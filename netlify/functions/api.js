@@ -53701,6 +53701,17 @@ var require_server = __commonJS({
     var ADMIN_PASSWORD = config.adminPassword;
     app2.use(cors());
     app2.use(express.json({ limit: "10mb" }));
+    app2.use((req, res, next) => {
+      if (req.body && (Buffer.isBuffer(req.body) || typeof req.body === "string")) {
+        const raw = req.body.toString();
+        try {
+          req.body = JSON.parse(raw);
+        } catch {
+          req.body = {};
+        }
+      }
+      next();
+    });
     var limiter = rateLimit({ windowMs: 60 * 1e3, max: 120, message: { error: "\u8BF7\u6C42\u8FC7\u4E8E\u9891\u7E41\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5" } });
     app2.use("/api", limiter);
     var authLimiter = rateLimit({ windowMs: 15 * 60 * 1e3, max: 20, message: { error: "\u5C1D\u8BD5\u6B21\u6570\u8FC7\u591A\uFF0C\u8BF715\u5206\u949F\u540E\u518D\u8BD5" } });
@@ -53764,14 +53775,6 @@ var require_server = __commonJS({
         `INSERT INTO notifications (user_id, type, from_user, post_id, content) VALUES (?, ?, ?, ?, ?) RETURNING id`
       ).run(userId, type, fromUser, postId, content);
     }
-    app2.post("/api/debug/echo", (req, res) => {
-      res.json({
-        contentType: req.headers["content-type"] || null,
-        contentLength: req.headers["content-length"] || null,
-        bodyType: typeof req.body,
-        bodyKeys: req.body && typeof req.body === "object" ? Object.keys(req.body) : null
-      });
-    });
     app2.post("/api/auth/register", async (req, res) => {
       const { username, password, nickname } = req.body;
       if (!username || !password) return res.status(400).json({ error: "\u7528\u6237\u540D\u548C\u5BC6\u7801\u4E0D\u80FD\u4E3A\u7A7A" });

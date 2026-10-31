@@ -19,6 +19,18 @@ const ADMIN_PASSWORD = config.adminPassword;
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+// Serverless 环境下 body 可能以字符串/缓冲区形式直接传入，这里兜底解析
+app.use((req, res, next) => {
+  if (req.body && (Buffer.isBuffer(req.body) || typeof req.body === 'string')) {
+    const raw = req.body.toString();
+    try {
+      req.body = JSON.parse(raw);
+    } catch {
+      req.body = {};
+    }
+  }
+  next();
+});
 
 // 安全：全局限流，防止暴力攻击
 const limiter = rateLimit({ windowMs: 60 * 1000, max: 120, message: { error: '请求过于频繁，请稍后再试' } });
@@ -92,15 +104,6 @@ async function notify(userId, type, fromUser, postId, content) {
 }
 
 // ---------- Auth routes ----------
-app.post('/api/debug/echo', (req, res) => {
-  res.json({
-    contentType: req.headers['content-type'] || null,
-    contentLength: req.headers['content-length'] || null,
-    bodyType: typeof req.body,
-    bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : null,
-  });
-});
-
 app.post('/api/auth/register', async (req, res) => {
   const { username, password, nickname } = req.body;
   if (!username || !password) return res.status(400).json({ error: '用户名和密码不能为空' });
