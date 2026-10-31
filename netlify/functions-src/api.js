@@ -14,6 +14,15 @@ exports.handler = async (event, context) => {
   }
   event.path = rest;
 
-  await app.ready;
+  // 数据库初始化失败时返回可诊断的 JSON，而不是让进程直接退出
+  try {
+    await app.ready;
+  } catch (err) {
+    return {
+      statusCode: 500,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({ error: '数据库连接失败', detail: err.message }),
+    };
+  }
   return handler(event, context);
 };

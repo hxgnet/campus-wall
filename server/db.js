@@ -6,10 +6,9 @@ const bcrypt = require('bcryptjs');
 types.setTypeParser(20, (v) => (v === null ? null : parseInt(v, 10)));
 
 const DATABASE_URL = process.env.DATABASE_URL || '';
-
-if (!DATABASE_URL) {
-  console.error('[db] 错误：环境变量 DATABASE_URL 为空。请配置 Supabase → Project Settings → Database → Connection string 后重启服务。');
-  process.exit(1);
+const DB_CONFIG_MISSING = !DATABASE_URL;
+if (DB_CONFIG_MISSING) {
+  console.error('[db] 错误：环境变量 DATABASE_URL 为空。请配置 Supabase → Project Settings → Database → Connection string。');
 }
 
 // 解析连接串：sslmode=require 时显式开启 SSL，并从 URL 中移除该参数，
@@ -35,7 +34,13 @@ function buildPoolConfig(rawUrl) {
   return cfg;
 }
 
-const pool = new Pool(buildPoolConfig(DATABASE_URL));
+const pool = DB_CONFIG_MISSING
+  ? {
+      query: async () => { throw new Error('DATABASE_URL 未配置，无法连接数据库'); },
+      on: () => {},
+      end: async () => {},
+    }
+  : new Pool(buildPoolConfig(DATABASE_URL));
 pool.on('error', (err) => {
   // 空闲连接异常时不能静默，否则线上会表现为所有查询挂起
   console.error('[db] 连接池空闲连接错误:', err.message);
@@ -343,7 +348,7 @@ async function init() {
 
 db.ready = init().catch((err) => {
   console.error('[db] 数据库初始化失败:', err.message);
-  process.exit(1);
+  throw err;
 });
 
 module.exports = db;
