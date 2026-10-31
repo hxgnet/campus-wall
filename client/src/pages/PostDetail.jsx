@@ -20,6 +20,7 @@ export default function PostDetail() {
   const [replyTo, setReplyTo] = useState(null);
   const [replyText, setReplyText] = useState('');
   const [showEmoji, setShowEmoji] = useState(false);
+  const isSuper = localStorage.getItem('admin_token') && sessionStorage.getItem('admin_role') === 'super';
 
   const load = async () => {
     setLoading(true);
@@ -90,6 +91,14 @@ export default function PostDetail() {
     } catch (e) { alert(e.message); }
   };
 
+  const superDelete = async () => {
+    if (!confirm('确定以超级管理员身份删除该帖子？作者将被扣除 10 点信誉分，此操作不可恢复。')) return;
+    try {
+      await api.adminDeletePost(id);
+      navigate('/');
+    } catch (e) { alert(e.message); }
+  };
+
   if (loading) return <div className="page"><div className="container"><div className="loading">加载中...</div></div></div>;
   if (!post) return <div className="page"><div className="container"><div className="empty">帖子不存在</div></div></div>;
 
@@ -104,6 +113,11 @@ export default function PostDetail() {
         <div className="detail-card">
           <div className="post-meta">
             <span className={`post-cat cat-${post.category}`}>{post.category}</span>
+            {post.is_staff && (
+              <span className="anon-badge" style={{ color: post.staff_role === 'super' ? 'var(--danger)' : 'var(--primary-dark)' }}>
+                {post.staff_role === 'super' ? '超级管理员发布' : '管理员发布'}
+              </span>
+            )}
             {post.is_anonymous && <span className="anon-badge">匿名</span>}
             <span className="post-time">{post.created_at}</span>
           </div>
@@ -121,6 +135,7 @@ export default function PostDetail() {
             <button className={`post-action ${favorited ? 'liked' : ''}`} onClick={handleFavorite}><span>{favorited ? '⭐' : '☆'}</span><span>{favorited ? '已收藏' : '收藏'}</span></button>
             <span className="post-action"><span>👁️</span><span>{post.views}</span></span>
             <button className="post-action" onClick={() => setShowReport(true)}><span>🚩</span><span>举报</span></button>
+            {isSuper && <button className="post-action" onClick={superDelete} style={{ color: 'var(--danger)' }}><span>🗑️</span><span>超管删除</span></button>}
             <span className="post-nick" style={{ marginLeft: 'auto' }}>{post.is_anonymous ? '🎭 匿名同学' : `@${post.nickname}`}</span>
           </div>
         </div>

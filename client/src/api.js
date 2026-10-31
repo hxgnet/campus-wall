@@ -92,7 +92,12 @@ export const api = {
     return true;
   },
   isAdmin: () => !!localStorage.getItem('admin_token'),
-  adminLogout: () => localStorage.removeItem('admin_token'),
+  adminLogout: () => {
+    localStorage.removeItem('admin_token');
+    sessionStorage.removeItem('admin_role');
+  },
+  adminWhoami: () =>
+    request('/admin/whoami', { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   getAdminPosts: (status = 'all', page = 1, pageSize = 50) =>
     request(`/admin/posts?status=${status}&page=${page}&pageSize=${pageSize}`, {
       headers: { 'x-admin-token': localStorage.getItem('admin_token') },
@@ -101,7 +106,7 @@ export const api = {
     request(`/admin/posts/${id}`, { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   updatePostStatus: (id, status) =>
     request(`/admin/posts/${id}`, { method: 'PUT', body: JSON.stringify({ status }), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
-  deletePost: (id) =>
+  adminDeletePost: (id) =>
     request(`/admin/posts/${id}`, { method: 'DELETE', headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   getAdminStats: () => request('/admin/stats', { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   getReports: () => request('/admin/reports', { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
@@ -112,6 +117,18 @@ export const api = {
     request(`/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ role }), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   deleteUser: (id) =>
     request(`/admin/users/${id}`, { method: 'DELETE', headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  adminBans: () => request('/admin/bans', { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  adminBanUser: (uid, reason) =>
+    request(`/admin/users/${uid}/ban`, { method: 'POST', body: JSON.stringify({ reason }), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  adminUnbanUser: (uid) =>
+    request(`/admin/users/${uid}/unban`, { method: 'POST', headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  adminAlerts: () => request('/admin/alerts', { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  adminReadAlerts: () =>
+    request('/admin/alerts/read', { method: 'POST', headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  adminConversations: (uid) =>
+    request(`/admin/conversations/${uid}`, { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  adminMessages: (uid, peerUid) =>
+    request(`/admin/messages/${uid}/${peerUid}`, { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   notifyUsers: (payload) =>
     request('/admin/notify', { method: 'POST', body: JSON.stringify(payload), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
 };

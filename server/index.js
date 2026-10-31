@@ -16,6 +16,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = config.jwtSecret;
 const ADMIN_PASSWORD = config.adminPassword;
+const SUPER_ADMIN_PASSWORD = config.superAdminPassword;
+const NOW_TEXT = `to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS')`;
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -76,9 +78,9 @@ async function resolveUser(req) {
   if (!token) return null;
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    const row = await db.prepare(`SELECT id, uid, nickname, role FROM users WHERE uid = ?`).get(payload.id);
+    const row = await db.prepare(`SELECT id, uid, nickname, role, banned, banned_reason FROM users WHERE uid = ?`).get(payload.id);
     if (!row) return null;
-    return { ...payload, uid: row.uid, dbId: row.id, nickname: row.nickname, role: row.role };
+    return { ...payload, uid: row.uid, dbId: row.id, nickname: row.nickname, role: row.role, banned: !!row.banned, banned_reason: row.banned_reason };
   } catch {
     return null;
   }
@@ -89,6 +91,9 @@ async function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: '未登录' });
   const user = await resolveUser(req);
   if (!user) return res.status(401).json({ error: '登录已过期' });
+  if (user.banned) {
+    return res.status(403).json({ error: `账号已被封禁${user.banned_reason ? `：${user.banned_reason}` : ''}` });
+  }
   req.user = user;
   next();
 }
@@ -99,10 +104,20 @@ async function getCurrentUser(req) {
 
 async function adminAuth(req, res, next) {
   const token = req.headers['x-admin-token'];
-  if (token === ADMIN_PASSWORD) return next();
+  if (token && token === SUPER_ADMIN_PASSWORD) { req.adminRole = 'super'; return next(); }
+  if (token && token === ADMIN_PASSWORD) { req.adminRole = 'admin'; return next(); }
   const user = await getCurrentUser(req);
-  if (user && user.role === 'admin') return next();
+  if (user && user.role === 'super') { req.adminRole = 'super'; req.adminUser = user; return next(); }
+  if (user && user.role === 'admin') { req.adminRole = 'admin'; req.adminUser = user; return next(); }
   res.status(401).json({ error: '无管理员权限' });
+}
+
+async function superAuth(req, res, next) {
+  const token = req.headers['x-admin-token'];
+  if (token && token === SUPER_ADMIN_PASSWORD) { req.adminRole = 'super'; return next(); }
+  const user = await getCurrentUser(req);
+  if (user && user.role === 'super') { req.adminRole = 'super'; req.adminUser = user; return next(); }
+  res.status(403).json({ error: '需要超级管理员权限' });
 }
 
 // 新用户 uid：Date.now() 十六进制补足 12 位 + 4 位随机十六进制（小写）
@@ -125,10 +140,83 @@ async function notify(userId, type, fromUser, postId, content) {
 // 同时不返回 client_ip / user_agent，避免隐私信息流向公开接口。
 const PUBLIC_POST_FIELDS = `
   p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
-  p.is_anonymous,
+  p.is_anonymous, p.is_staff, p.staff_role,
   CASE WHEN p.is_anonymous THEN NULL ELSE u.uid END AS user_id,
   CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname
 `;
+
+// ---------- Helper: 风控 ----------
+async function logAlert(content) {
+  try {
+    await db.prepare(`INSERT INTO super_alerts (content) VALUES (?) RETURNING id`).run(content);
+  } catch (e) {
+    console.error('[alert] 安全告警写入失败:', e.message);
+  }
+}
+
+async function buildBannedInfo(userId) {
+  const u = await db.prepare(
+    `SELECT username, nickname, real_name, class_name, address, email, wechat, qq, phone FROM users WHERE id = ?`
+  ).get(userId);
+  if (!u) return null;
+  return JSON.stringify({
+    username: u.username || '', nickname: u.nickname || '',
+    real_name: u.real_name || '', class_name: u.class_name || '',
+    address: u.address || '', email: u.email || '',
+    wechat: u.wechat || '', qq: u.qq || '', phone: u.phone || '',
+  });
+}
+
+// 扣信誉分；归零自动封禁并写安全告警，返回最新信誉分
+async function penalizeAndMaybeBan(userId, points) {
+  if (!userId) return null;
+  const u = await db.prepare(`SELECT id, username, reputation, banned FROM users WHERE id = ?`).get(userId);
+  if (!u) return null;
+  const reputation = Math.max(0, (Number(u.reputation) || 0) - Number(points || 0));
+  let banned = !!u.banned;
+  if (reputation <= 0 && !banned) {
+    const info = await buildBannedInfo(userId);
+    await db.prepare(
+      `UPDATE users SET reputation = ?, banned = TRUE, banned_reason = ?, banned_at = ${NOW_TEXT}, banned_info = ? WHERE id = ?`
+    ).run(reputation, '信誉分归零', info, userId);
+    banned = true;
+    await logAlert(`信誉分归零自动封禁：@${u.username}`);
+  } else {
+    await db.prepare(`UPDATE users SET reputation = ? WHERE id = ?`).run(reputation, userId);
+  }
+  return { reputation, banned };
+}
+
+const normText = (v) => String(v == null ? '' : v).replace(/\s+/g, '').toLowerCase();
+
+// 资料保存后检测是否命中已封禁用户的资料（用于识别小号）
+async function findBanHit(userId) {
+  const me = await db.prepare(
+    `SELECT real_name, class_name, email, wechat, qq, phone FROM users WHERE id = ?`
+  ).get(userId);
+  if (!me) return null;
+  const bannedUsers = await db.prepare(
+    `SELECT id, username, banned_info, real_name, class_name, email, wechat, qq, phone
+     FROM users WHERE banned = TRUE AND id <> ?`
+  ).all(userId);
+  const CONTACTS = ['email', 'phone', 'wechat', 'qq'];
+  for (const b of bannedUsers) {
+    let info = {};
+    try { info = b.banned_info ? JSON.parse(b.banned_info) : {}; } catch { info = {}; }
+    for (const k of CONTACTS) {
+      const mine = normText(me[k]);
+      if (!mine) continue;
+      if (mine === normText(info[k]) || mine === normText(b[k])) return b;
+    }
+    const rn = normText(me.real_name);
+    const cn = normText(me.class_name);
+    if (rn && cn) {
+      if ((rn === normText(info.real_name) && cn === normText(info.class_name)) ||
+          (rn === normText(b.real_name) && cn === normText(b.class_name))) return b;
+    }
+  }
+  return null;
+}
 
 // ---------- Auth routes ----------
 app.post('/api/auth/register', async (req, res) => {
@@ -153,6 +241,9 @@ app.post('/api/auth/login', async (req, res) => {
   const user = await db.prepare(`SELECT * FROM users WHERE username = ?`).get(username);
   if (!user || !(await bcrypt.compare(password, user.password_hash))) {
     return res.status(400).json({ error: '用户名或密码错误' });
+  }
+  if (user.banned) {
+    return res.status(403).json({ error: '账号已被封禁' });
   }
   const token = jwt.sign({ id: user.uid, username: user.username, nickname: user.nickname, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
   res.json({ token, user: { uid: user.uid, username: user.username, nickname: user.nickname, avatar: user.avatar, role: user.role } });
@@ -184,13 +275,23 @@ app.put('/api/auth/profile', auth, async (req, res) => {
   if (sets.length === 0) return res.json({ ok: true });
   params.push(req.user.dbId);
   await db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+
+  // 封禁联动：资料与已封禁用户相同 → 判定为小号并直接封禁
+  const hit = await findBanHit(req.user.dbId);
+  if (hit) {
+    await db.prepare(
+      `UPDATE users SET banned = TRUE, banned_reason = ?, banned_at = ${NOW_TEXT} WHERE id = ?`
+    ).run('命中封禁资料', req.user.dbId);
+    await logAlert(`检测到封禁用户重新注册：${req.user.username || req.user.uid}`);
+    return res.json({ ok: true, banned: true, banned_reason: '命中封禁资料' });
+  }
   res.json({ ok: true });
 });
 
 // User profile (public) — :id 为对外 uid
 app.get('/api/users/:id', async (req, res) => {
   const user = await db.prepare(
-    `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public FROM users WHERE uid = ?`
+    `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation FROM users WHERE uid = ?`
   ).get(req.params.id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
   const postCount = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE user_id = ? AND status = 'approved' AND is_anonymous = FALSE`).get(user.id)).c;
@@ -198,6 +299,12 @@ app.get('/api/users/:id', async (req, res) => {
     uid: user.uid, username: user.username, nickname: user.nickname, avatar: user.avatar,
     bio: user.bio, created_at: user.created_at, profile_public: !!user.profile_public, postCount,
   };
+  // 信誉分仅对本人与超级管理员可见
+  const viewer = await getCurrentUser(req);
+  const isSuperToken = req.headers['x-admin-token'] && req.headers['x-admin-token'] === SUPER_ADMIN_PASSWORD;
+  if (isSuperToken || (viewer && (viewer.uid === user.uid || viewer.role === 'super'))) {
+    out.reputation = user.reputation;
+  }
   if (user.profile_public) {
     const contact = await db.prepare(
       `SELECT real_name, class_name, address, email, wechat, qq, phone FROM users WHERE id = ?`
@@ -250,7 +357,7 @@ app.get('/api/posts', async (req, res) => {
 
 app.get('/api/posts/hot', async (req, res) => {
   const posts = await db.prepare(
-    `SELECT p.id, p.category, p.content, p.likes, p.views, p.is_anonymous,
+    `SELECT p.id, p.category, p.content, p.likes, p.views, p.is_anonymous, p.is_staff, p.staff_role,
             CASE WHEN p.is_anonymous THEN NULL ELSE u.uid END AS user_id,
             CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname
      FROM posts p LEFT JOIN users u ON u.id = p.user_id
@@ -304,14 +411,22 @@ app.post('/api/posts', auth, upload.array('images', 9), async (req, res) => {
     return res.status(500).json({ error: '图片上传失败' });
   }
   const tagArr = tags ? (Array.isArray(tags) ? tags : JSON.parse(tags)) : [];
+  // 管理员 / 超级管理员发帖直接过审并标记身份
+  const isStaff = req.user.role === 'admin' || req.user.role === 'super';
+  const status = isStaff ? 'approved' : 'pending';
+  const staffRole = isStaff ? req.user.role : null;
   const result = await db.prepare(
-    `INSERT INTO posts (user_id, category, content, tags, nickname, images, is_anonymous, client_ip, user_agent)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+    `INSERT INTO posts (user_id, category, content, tags, nickname, images, is_anonymous, client_ip, user_agent, status, is_staff, staff_role)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
   ).run(
     req.user.dbId, category, content.trim(), JSON.stringify(tagArr), (nickname || req.user.nickname).trim(),
-    JSON.stringify(images), isAnonymous, clientIp, userAgent
+    JSON.stringify(images), isAnonymous, clientIp, userAgent, status, isStaff, staffRole
   );
-  res.json({ id: result.lastInsertRowid, message: '发布成功，等待管理员审核' });
+  res.json({
+    id: result.lastInsertRowid,
+    message: isStaff ? '发布成功' : '发布成功，等待管理员审核',
+    status,
+  });
 });
 
 app.delete('/api/posts/:id', auth, async (req, res) => {
@@ -596,6 +711,10 @@ app.post('/api/messages', auth, async (req, res) => {
 });
 
 // ---------- Admin ----------
+app.get('/api/admin/whoami', adminAuth, (req, res) => {
+  res.json({ role: req.adminRole || 'admin' });
+});
+
 app.post('/api/admin/notify', adminAuth, async (req, res) => {
   const { uids, all, content } = req.body;
   if (!content || !String(content).trim()) return res.status(400).json({ error: '通知内容不能为空' });
@@ -630,7 +749,7 @@ app.get('/api/admin/posts', adminAuth, async (req, res) => {
   const total = (await db.prepare(`SELECT COUNT(*) as c FROM posts p ${where}`).get(...params)).c;
   const posts = await db.prepare(
     `SELECT p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
-            p.is_anonymous, p.nickname, p.client_ip, p.user_agent,
+            p.is_anonymous, p.nickname, p.client_ip, p.user_agent, p.is_staff, p.staff_role,
             CASE WHEN p.user_id IS NULL THEN NULL ELSE u.uid END AS user_id
      FROM posts p LEFT JOIN users u ON u.id = p.user_id
      ${where} ORDER BY p.id DESC LIMIT ? OFFSET ?`
@@ -672,15 +791,31 @@ app.put('/api/admin/posts/:id', adminAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete('/api/admin/posts/:id', adminAuth, async (req, res) => {
-  const post = await db.prepare(`SELECT id, images FROM posts WHERE id = ?`).get(req.params.id);
+app.delete('/api/admin/posts/:id', superAuth, async (req, res) => {
+  const post = await db.prepare(`SELECT id, user_id, category, content, images FROM posts WHERE id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
+  let authorName = '已注销用户';
+  if (post.user_id) {
+    const author = await db.prepare(`SELECT username FROM users WHERE id = ?`).get(post.user_id);
+    if (author) authorName = `@${author.username}`;
+  }
   if (post.images) {
     for (const img of JSON.parse(post.images)) {
       try { await fileStorage.deleteByUrl(img, uploadsDir); } catch (e) { console.error('[admin] 图片清理失败:', e.message); }
     }
   }
-  // 评论 / 点赞 / 收藏由外键级联删除；举报与通知没有外键，需显式清理
+  // 超级管理员删帖 → 作者信誉 -10，并记录安全告警
+  if (post.user_id) {
+    const penalty = await penalizeAndMaybeBan(post.user_id, 10);
+    await logAlert(`超级管理员删除帖子 #${post.id}（分类：${post.category}，作者：${authorName}）`);
+    // 评论 / 点赞 / 收藏由外键级联删除；举报与通知没有外键，需显式清理
+    await db.transaction(async (tx) => {
+      await tx.prepare(`DELETE FROM reports WHERE post_id = ? OR comment_id IN (SELECT id FROM comments WHERE post_id = ?)`).run(req.params.id, req.params.id);
+      await tx.prepare(`DELETE FROM notifications WHERE post_id = ?`).run(req.params.id);
+      await tx.prepare(`DELETE FROM posts WHERE id = ?`).run(req.params.id);
+    });
+    return res.json({ ok: true, message: '帖子及关联数据已删除', reputation: penalty ? penalty.reputation : null });
+  }
   await db.transaction(async (tx) => {
     await tx.prepare(`DELETE FROM reports WHERE post_id = ? OR comment_id IN (SELECT id FROM comments WHERE post_id = ?)`).run(req.params.id, req.params.id);
     await tx.prepare(`DELETE FROM notifications WHERE post_id = ?`).run(req.params.id);
@@ -711,24 +846,145 @@ app.get('/api/admin/reports', adminAuth, async (req, res) => {
 
 app.put('/api/admin/reports/:id', adminAuth, async (req, res) => {
   const { status } = req.body;
+  const report = await db.prepare(`SELECT id, post_id, comment_id, status FROM reports WHERE id = ?`).get(req.params.id);
+  if (!report) return res.status(404).json({ error: '举报不存在' });
   await db.prepare(`UPDATE reports SET status = ? WHERE id = ?`).run(status, req.params.id);
-  res.json({ ok: true });
+
+  // 举报判定有效（valid / resolved）→ 作者信誉 -10（同一条举报只扣一次）
+  let reputation = null;
+  const effective = status === 'valid' || status === 'resolved';
+  const wasEffective = report.status === 'valid' || report.status === 'resolved';
+  if (effective && !wasEffective) {
+    let authorId = null;
+    if (report.post_id) {
+      authorId = (await db.prepare(`SELECT user_id FROM posts WHERE id = ?`).get(report.post_id))?.user_id || null;
+    } else if (report.comment_id) {
+      authorId = (await db.prepare(`SELECT user_id FROM comments WHERE id = ?`).get(report.comment_id))?.user_id || null;
+    }
+    if (authorId) {
+      const r = await penalizeAndMaybeBan(authorId, 10);
+      reputation = r ? r.reputation : null;
+    }
+  }
+  res.json({ ok: true, reputation });
 });
 
 app.get('/api/admin/users', adminAuth, async (req, res) => {
-  const users = await db.prepare(`SELECT uid, username, nickname, avatar, role, created_at FROM users ORDER BY id DESC`).all();
+  const users = await db.prepare(
+    `SELECT uid, username, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at
+     FROM users ORDER BY id DESC`
+  ).all();
   res.json(users);
 });
 
-app.put('/api/admin/users/:id', adminAuth, async (req, res) => {
+app.put('/api/admin/users/:id', superAuth, async (req, res) => {
   const { role } = req.body;
+  if (!['user', 'admin', 'super'].includes(role)) return res.status(400).json({ error: '无效角色' });
   await db.prepare(`UPDATE users SET role = ? WHERE uid = ?`).run(role, req.params.id);
   res.json({ ok: true });
 });
 
-app.delete('/api/admin/users/:id', adminAuth, async (req, res) => {
+app.delete('/api/admin/users/:id', superAuth, async (req, res) => {
   await db.prepare(`DELETE FROM users WHERE uid = ?`).run(req.params.id);
   res.json({ ok: true });
+});
+
+// ---------- Super Admin: 封禁 / 告警 / 私信 ----------
+app.post('/api/admin/users/:uid/ban', superAuth, async (req, res) => {
+  const reason = (req.body && req.body.reason ? String(req.body.reason).trim() : '') || '违反社区规范';
+  const user = await db.prepare(`SELECT id, uid, username FROM users WHERE uid = ?`).get(req.params.uid);
+  if (!user) return res.status(404).json({ error: '用户不存在' });
+  const info = await buildBannedInfo(user.id);
+  await db.prepare(
+    `UPDATE users SET banned = TRUE, banned_reason = ?, banned_at = ${NOW_TEXT}, banned_info = ? WHERE id = ?`
+  ).run(reason, info, user.id);
+  await logAlert(`超级管理员封禁用户：@${user.username}（原因：${reason}）`);
+  res.json({ ok: true, uid: user.uid, banned: true, reason });
+});
+
+app.post('/api/admin/users/:uid/unban', superAuth, async (req, res) => {
+  const user = await db.prepare(`SELECT id, uid, username FROM users WHERE uid = ?`).get(req.params.uid);
+  if (!user) return res.status(404).json({ error: '用户不存在' });
+  await db.prepare(
+    `UPDATE users SET banned = FALSE, banned_reason = NULL, banned_at = NULL, banned_info = NULL WHERE id = ?`
+  ).run(user.id);
+  res.json({ ok: true, uid: user.uid, banned: false });
+});
+
+app.get('/api/admin/bans', superAuth, async (req, res) => {
+  const list = await db.prepare(
+    `SELECT uid, username, nickname, role, reputation, banned_reason, banned_at
+     FROM users WHERE banned = TRUE ORDER BY id DESC`
+  ).all();
+  res.json(list);
+});
+
+app.get('/api/admin/alerts', superAuth, async (req, res) => {
+  const list = await db.prepare(`SELECT id, content, created_at, read FROM super_alerts ORDER BY id DESC`).all();
+  res.json(list);
+});
+
+app.post('/api/admin/alerts/read', superAuth, async (req, res) => {
+  const result = await db.prepare(`UPDATE super_alerts SET read = TRUE WHERE read = FALSE`).run();
+  res.json({ ok: true, count: result.changes });
+});
+
+// 查看指定用户的会话列表（不标记已读）
+app.get('/api/admin/conversations/:uid', superAuth, async (req, res) => {
+  const user = await db.prepare(`SELECT id, uid FROM users WHERE uid = ?`).get(req.params.uid);
+  if (!user) return res.status(404).json({ error: '用户不存在' });
+  const rows = await db.prepare(
+    `SELECT * FROM messages WHERE from_uid = ? OR to_uid = ? ORDER BY id DESC`
+  ).all(user.uid, user.uid);
+  const map = new Map();
+  for (const m of rows) {
+    const peer = m.from_uid === user.uid ? m.to_uid : m.from_uid;
+    if (!map.has(peer)) {
+      map.set(peer, { uid: peer, last_content: m.content, last_time: m.created_at, unread: 0 });
+    }
+    if (m.to_uid === user.uid && m.from_uid === peer && !m.read) map.get(peer).unread += 1;
+  }
+  const peers = [...map.keys()];
+  if (peers.length > 0) {
+    const placeholders = peers.map(() => '?').join(', ');
+    const users = await db.prepare(`SELECT uid, nickname, avatar FROM users WHERE uid IN (${placeholders})`).all(...peers);
+    const userMap = new Map(users.map((u) => [u.uid, u]));
+    for (const c of map.values()) {
+      const u = userMap.get(c.uid);
+      c.nickname = u ? u.nickname : '';
+      c.avatar = u ? u.avatar : null;
+    }
+  }
+  res.json([...map.values()]);
+});
+
+async function adminConversationMessages(userUid, peerUid) {
+  const list = await db.prepare(
+    `SELECT id, from_uid, to_uid, content, read, created_at FROM messages
+     WHERE (from_uid = ? AND to_uid = ?) OR (from_uid = ? AND to_uid = ?)
+     ORDER BY id ASC`
+  ).all(userUid, peerUid, peerUid, userUid);
+  return list;
+}
+
+// 查看指定用户与对端的完整会话（不标记已读）
+app.get('/api/admin/messages/:uid/:peerUid', superAuth, async (req, res) => {
+  const user = await db.prepare(`SELECT uid FROM users WHERE uid = ?`).get(req.params.uid);
+  const peer = await db.prepare(`SELECT uid FROM users WHERE uid = ?`).get(req.params.peerUid);
+  if (!user) return res.status(404).json({ error: '用户不存在' });
+  if (!peer) return res.status(404).json({ error: '对端用户不存在' });
+  res.json(await adminConversationMessages(user.uid, peer.uid));
+});
+
+// 兼容仅传 :uid 并通过对端查询参数指定 peer 的调用方式
+app.get('/api/admin/messages/:uid', superAuth, async (req, res) => {
+  const peerUid = req.query.peer || req.query.peerUid || req.query.to;
+  if (!peerUid) return res.status(400).json({ error: '请提供对端 uid' });
+  const user = await db.prepare(`SELECT uid FROM users WHERE uid = ?`).get(req.params.uid);
+  const peer = await db.prepare(`SELECT uid FROM users WHERE uid = ?`).get(peerUid);
+  if (!user) return res.status(404).json({ error: '用户不存在' });
+  if (!peer) return res.status(404).json({ error: '对端用户不存在' });
+  res.json(await adminConversationMessages(user.uid, peer.uid));
 });
 
 // ---------- Health check ----------

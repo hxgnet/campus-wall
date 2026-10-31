@@ -122,7 +122,9 @@ export default function Profile() {
               <h2 style={{ margin: '8px 0 4px' }}>{profile.nickname}</h2>
               {profile.bio && <p style={{ color: 'var(--text-light)', fontSize: 14 }}>{profile.bio}</p>}
               <p style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 8 }}>
-                帖子 {posts.length} · 加入于 {profile.created_at?.slice(0, 10)}
+                帖子 {posts.length}
+                {profile.reputation !== undefined && <> · 信誉分 {profile.reputation}</>}
+                {' '}· 加入于 {profile.created_at?.slice(0, 10)}
               </p>
               {isMe && <button className="btn btn-secondary" style={{ marginTop: 12 }} onClick={() => setEditing(true)}>编辑资料</button>}
               {!isMe && user && (

@@ -25,4 +25,6 @@ module.exports = {
   jwtSecret: process.env.JWT_SECRET || 'campus-wall-secret-key-change-me',
   // 管理员密码
   adminPassword: process.env.ADMIN_PASSWORD || 'admin123',
+  // 超级管理员密码（本地兜底，生产环境务必通过环境变量配置）
+  superAdminPassword: process.env.SUPER_ADMIN_PASSWORD || 'super123456',
 };
