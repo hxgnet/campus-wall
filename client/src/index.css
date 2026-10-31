@@ -727,3 +727,53 @@ body.dark input::placeholder, body.dark textarea::placeholder { color: #64748b; 
   color: var(--text-light);
   margin-top: 4px;
 }
+
+/* ---------- 首页固定工具栏 ---------- */
+:root { --header-h: 64px; }
+
+.feed-toolbar {
+  position: sticky;
+  top: var(--header-h);
+  z-index: 90;
+  background: var(--bg);
+  padding: 10px 0 8px;
+  margin: 0 -16px 4px;
+  padding-left: 16px;
+  padding-right: 16px;
+  box-shadow: 0 6px 12px -8px rgba(0, 0, 0, 0.15);
+}
+
+.feed-toolbar .search-bar { margin: 0 0 10px; }
+
+.toolbar-scroll {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.toolbar-scroll::-webkit-scrollbar { display: none; }
+
+.chip-row { display: flex; gap: 8px; flex: 1; min-width: 0; }
+.chip-row .cat-tab { padding: 7px 14px; }
+
+.sort-row { display: flex; gap: 6px; flex-shrink: 0; }
+.sort-tab {
+  padding: 6px 12px;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-light);
+  background: transparent;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+.sort-tab.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.feed-list { padding-top: 8px; }

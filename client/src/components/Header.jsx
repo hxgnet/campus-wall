@@ -2,13 +2,24 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext.jsx';
 import { useTheme } from '../ThemeContext.jsx';
 import { api } from '../api.js';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export default function Header() {
   const { user, logout } = useAuth();
   const { dark, toggle } = useTheme();
   const navigate = useNavigate();
   const [unread, setUnread] = useState(0);
+  const headerRef = useRef(null);
+
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const sync = () => document.documentElement.style.setProperty('--header-h', `${el.offsetHeight}px`);
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   useEffect(() => {
     if (user) {
@@ -17,7 +28,7 @@ export default function Header() {
   }, [user]);
 
   return (
-    <header className="header">
+    <header className="header" ref={headerRef}>
       <div className="container header-inner">
         <NavLink to="/" className="logo">
           <span className="logo-icon">🏫</span>
