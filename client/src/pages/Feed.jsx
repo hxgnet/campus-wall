@@ -39,16 +39,13 @@ export default function Feed() {
           </div>
 
           <div className="toolbar-scroll">
-            <div className="chip-row">
-              <button className={`cat-tab ${category === 'all' ? 'active' : ''}`} onClick={() => setCategory('all')}>🌟 全部</button>
-              {CATEGORIES.map((c) => (
-                <button key={c.name} className={`cat-tab ${category === c.name ? 'active' : ''}`} onClick={() => setCategory(c.name)}>{c.icon} {c.name}</button>
-              ))}
-            </div>
-            <div className="sort-row">
-              <button className={`sort-tab ${sort === 'new' ? 'active' : ''}`} onClick={() => setSort('new')}>🆕 最新</button>
-              <button className={`sort-tab ${sort === 'hot' ? 'active' : ''}`} onClick={() => setSort('hot')}>🔥 热门</button>
-            </div>
+            <button className={`cat-tab ${category === 'all' ? 'active' : ''}`} onClick={() => setCategory('all')}>🌟 全部</button>
+            {CATEGORIES.map((c) => (
+              <button key={c.name} className={`cat-tab ${category === c.name ? 'active' : ''}`} onClick={() => setCategory(c.name)}>{c.icon} {c.name}</button>
+            ))}
+            <span className="toolbar-divider" />
+            <button className={`sort-tab ${sort === 'new' ? 'active' : ''}`} onClick={() => setSort('new')}>🆕 最新</button>
+            <button className={`sort-tab ${sort === 'hot' ? 'active' : ''}`} onClick={() => setSort('hot')}>🔥 热门</button>
           </div>
         </div>
 

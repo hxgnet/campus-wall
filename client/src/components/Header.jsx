@@ -35,6 +35,7 @@ export default function Header() {
           <span>校园墙</span>
         </NavLink>
         <nav className="nav-links">
+          <div className="nav-inner">
           <NavLink to="/" end>首页</NavLink>
           <NavLink to="/create">发帖</NavLink>
           {user ? (
@@ -48,6 +49,7 @@ export default function Header() {
             <NavLink to="/login">登录</NavLink>
           )}
           <button className="back-btn" style={{ color: '#fff', margin: 0, fontSize: 18 }} onClick={toggle}>{dark ? '☀️' : '🌙'}</button>
+          </div>
         </nav>
       </div>
     </header>
