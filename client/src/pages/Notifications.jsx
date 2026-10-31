@@ -19,7 +19,7 @@ const TYPE_ICON = {
 
 export default function Notifications() {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
   const [list, setList] = useState([]);
   const [requests, setRequests] = useState([]);
   const [conversations, setConversations] = useState([]);
@@ -31,13 +31,14 @@ export default function Notifications() {
   };
 
   useEffect(() => {
+    if (loading) return;
     if (!user) { navigate('/login'); return; }
     loadAll();
     // 进入通知页即标记全部已读，并通知 Header 清零徽标
     api.markAllRead()
       .then(() => window.dispatchEvent(new Event('notifications-read')))
       .catch(() => {});
-  }, [user, navigate]);
+  }, [user, loading, navigate]);
 
   const accept = async (uid) => {
     try {

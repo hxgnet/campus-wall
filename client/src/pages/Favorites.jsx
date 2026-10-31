@@ -6,14 +6,15 @@ import PostCard from '../components/PostCard.jsx';
 
 export default function Favorites() {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (authLoading) return;
     if (!user) { navigate('/login'); return; }
     api.getFavorites().then(setPosts).catch(() => {}).finally(() => setLoading(false));
-  }, [user, navigate]);
+  }, [user, authLoading, navigate]);
 
   if (!user) return null;
 

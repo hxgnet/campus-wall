@@ -6,7 +6,7 @@ import { useAuth } from '../AuthContext.jsx';
 export default function Messages() {
   const { uid } = useParams();
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const [messages, setMessages] = useState([]);
   const [peer, setPeer] = useState(null);
   const [input, setInput] = useState('');
@@ -15,6 +15,7 @@ export default function Messages() {
 
   // 进入会话即拉取记录（服务端会把对方发来的消息标记已读）
   useEffect(() => {
+    if (authLoading) return;
     if (!user) { navigate('/login'); return; }
     setLoading(true);
     Promise.all([api.getUser(uid), api.getConversation(uid)])
