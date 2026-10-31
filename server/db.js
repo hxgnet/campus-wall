@@ -350,5 +350,7 @@ db.ready = init().catch((err) => {
   console.error('[db] 数据库初始化失败:', err.message);
   throw err;
 });
+// 标记该 Promise 的拒绝已被观察，避免 Serverless 运行时把它当作未处理的拒绝而崩溃
+db.ready.catch(() => {});
 
 module.exports = db;
