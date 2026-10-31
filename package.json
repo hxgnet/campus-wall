@@ -8,7 +8,12 @@
   "scripts": {
     "install:all": "npm install --prefix server && npm install --prefix client",
     "build": "npm install --prefix client && npm run build --prefix client",
+    "build:fn": "esbuild netlify/functions-src/api.js --bundle --platform=node --target=node20 --format=cjs --external:pg-native --external:proxy-agent --external:urllib --outfile=netlify/functions/api.js",
     "start": "node server/index.js",
     "dev": "node server/index.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "serverless-http": "^3.2.0"
   }
 }

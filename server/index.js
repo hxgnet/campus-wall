@@ -27,8 +27,18 @@ app.use('/api', limiter);
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { error: '尝试次数过多，请15分钟后再试' } });
 app.use('/api/auth', authLimiter);
 
-const uploadsDir = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+let uploadsDir = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
+try {
+  if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+} catch (err) {
+  // Serverless 环境（如 Netlify）根目录只读，退回 /tmp
+  uploadsDir = '/tmp/uploads';
+  try {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  } catch (e) {
+    console.warn('[uploads] 无法创建上传目录:', err.message);
+  }
+}
 app.use('/uploads', express.static(uploadsDir));
 
 const storage = multer.diskStorage({
@@ -466,13 +476,19 @@ if (fs.existsSync(clientDist)) {
 }
 
 // schema 初始化 / 种子数据写入完成后再开始接收请求
-db.ready.then(() => {
-  app.listen(PORT, () => {
-    console.log(`校园墙服务已启动: http://localhost:${PORT}`);
-    console.log(`管理员密码: ${ADMIN_PASSWORD}`);
-    console.log(`图片存储: ${{ r2: 'Cloudflare R2', supabase: 'Supabase Storage', qiniu: '七牛云', local: '本地 uploads/（未配置云端存储）' }[fileStorage.provider]}`);
+if (require.main === module) {
+  db.ready.then(() => {
+    app.listen(PORT, () => {
+      console.log(`校园墙服务已启动: http://localhost:${PORT}`);
+      console.log(`管理员密码: ${ADMIN_PASSWORD}`);
+      console.log(`图片存储: ${{ r2: 'Cloudflare R2', supabase: 'Supabase Storage', qiniu: '七牛云', local: '本地 uploads/（未配置云端存储）' }[fileStorage.provider]}`);
+    });
+  }).catch((err) => {
+    console.error('[server] 启动失败:', err.message);
+    process.exit(1);
   });
-}).catch((err) => {
-  console.error('[server] 启动失败:', err.message);
-  process.exit(1);
-});
+}
+
+// Serverless 平台（Netlify）复用的导出
+module.exports = app;
+module.exports.ready = db.ready;

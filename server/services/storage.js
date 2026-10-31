@@ -4,7 +4,10 @@
 const path = require('path');
 const fs = require('fs');
 const config = require('../config');
-const { uploadToQiniu } = require('./qiniu');
+// 七牛云 SDK 仅在启用时才加载，避免 Serverless 打包时引入无用依赖
+const uploadToQiniu = config.qiniu.enabled
+  ? require('./qiniu').uploadToQiniu
+  : async () => { throw new Error('七牛云未配置'); };
 
 let s3Client = null;
 if (config.r2.enabled) {

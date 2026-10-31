@@ -1,0 +1,27 @@
+[build]
+  command = "npm ci --no-audit --no-fund && npm --prefix server ci --no-audit --no-fund && npm --prefix client ci --no-audit --no-fund && npm --prefix client run build && npm run build:fn"
+  publish = "client/dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "20"
+  UPLOADS_DIR = "/tmp/uploads"
+
+# API 请求转发到 Serverless 函数
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/uploads/*"
+  to = "/.netlify/functions/api/uploads/:splat"
+  status = 200
+  force = true
+
+# 其余请求交给前端 SPA
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

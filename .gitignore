@@ -7,3 +7,5 @@ client/dist/
 *.log
 .env
 server/*.tmp.js
+netlify/functions/api.js
+*.tmp.js
