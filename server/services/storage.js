@@ -1,31 +1,12 @@
 // 通用文件存储适配器
-// 优先级：Cloudflare R2 > 七牛云 > 本地磁盘
+// 优先级：Supabase Storage > 本地磁盘
 // 调用方只需 saveFile(localPath, key)，返回可访问的 URL
 const path = require('path');
 const fs = require('fs');
 const config = require('../config');
-// 七牛云 SDK 仅在启用时才加载，避免 Serverless 打包时引入无用依赖
-const uploadToQiniu = config.qiniu.enabled
-  ? require('./qiniu').uploadToQiniu
-  : async () => { throw new Error('七牛云未配置'); };
 
-let s3Client = null;
-if (config.r2.enabled) {
-  const { S3Client } = require('@aws-sdk/client-s3');
-  s3Client = new S3Client({
-    region: 'auto',
-    endpoint: config.r2.endpoint,
-    credentials: {
-      accessKeyId: config.r2.accessKeyId,
-      secretAccessKey: config.r2.secretAccessKey,
-    },
-  });
-}
 
-const provider = config.r2.enabled ? 'r2'
-  : config.supabase.enabled ? 'supabase'
-  : config.qiniu.enabled ? 'qiniu'
-  : 'local';
+const provider = config.supabase.enabled ? 'supabase' : 'local';
 
 const MIME = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
@@ -34,22 +15,6 @@ const MIME = {
 };
 function contentType(filePath) {
   return MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
-}
-
-function r2PublicUrl(key) {
-  const base = config.r2.publicUrl.replace(/\/+$/, '');
-  return `${base}/${key}`;
-}
-
-async function uploadR2(localPath, key) {
-  const { PutObjectCommand } = require('@aws-sdk/client-s3');
-  await s3Client.send(new PutObjectCommand({
-    Bucket: config.r2.bucket,
-    Key: key,
-    Body: fs.readFileSync(localPath),
-    ContentType: contentType(localPath),
-  }));
-  return r2PublicUrl(key);
 }
 
 async function uploadSupabase(localPath, key) {
@@ -79,18 +44,8 @@ async function uploadSupabase(localPath, key) {
  * @returns {Promise<string>} 可访问 URL（云端）或 /uploads/xxx（本地）
  */
 async function saveFile(localPath, key) {
-  if (provider === 'r2') {
-    const url = await uploadR2(localPath, key);
-    if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
-    return url;
-  }
   if (provider === 'supabase') {
     const url = await uploadSupabase(localPath, key);
-    if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
-    return url;
-  }
-  if (provider === 'qiniu') {
-    const url = await uploadToQiniu(localPath, key);
     if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
     return url;
   }
@@ -123,14 +78,6 @@ async function deleteByUrl(url, uploadsDir) {
         });
       }
       return;
-    }
-    if (provider === 'r2') {
-      const base = config.r2.publicUrl.replace(/\/+$/, '');
-      if (url.startsWith(base + '/')) {
-        const key = url.slice(base.length + 1);
-        const { DeleteObjectCommand } = require('@aws-sdk/client-s3');
-        await s3Client.send(new DeleteObjectCommand({ Bucket: config.r2.bucket, Key: key }));
-      }
     }
   } catch (e) {
     console.error('删除文件失败:', e.message);

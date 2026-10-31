@@ -1,5 +1,6 @@
 [build]
-  command = "npm ci --no-audit --no-fund && npm --prefix server ci --no-audit --no-fund && npm --prefix client ci --no-audit --no-fund && npm --prefix client run build && npm run build:fn"
+  # 函数产物已提交在仓库中（netlify/functions/api.js），构建时只需构建前端
+  command = "npm --prefix client ci --no-audit --no-fund && npm --prefix client run build"
   publish = "client/dist"
   functions = "netlify/functions"
 
