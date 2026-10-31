@@ -1,0 +1,9 @@
+node_modules/
+server/campus-wall.db
+server/campus-wall.db-wal
+server/campus-wall.db-shm
+server/uploads/
+client/dist/
+*.log
+.env
+server/*.tmp.js

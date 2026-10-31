@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: campus-wall
+    runtime: node
+    plan: free
+    buildCommand: npm ci --prefix client && npm run build --prefix client && npm ci --prefix server
+    startCommand: node server/index.js
+    healthCheckPath: /health
+    envVars:
+      # PostgreSQL 连接串（Supabase → Project Settings → Database → Session pooler）
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_PASSWORD
+        sync: false
+      # Supabase Storage 图片存储（免费 1GB，无需银行卡）
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        sync: false

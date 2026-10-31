@@ -1,0 +1,14 @@
+{
+  "name": "campus-wall",
+  "version": "1.0.0",
+  "description": "校园墙 - 匿名校园社交墙",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "build": "npm install --prefix client && npm run build --prefix client",
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
+  }
+}
