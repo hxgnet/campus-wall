@@ -70,29 +70,46 @@ const upload = multer({
 });
 
 // ---------- Auth middleware ----------
-function auth(req, res, next) {
+// JWT 中的 id 为对外 uid，这里统一解析出内部 dbId，避免内部自增 ID 外泄
+async function resolveUser(req) {
   const token = req.headers['authorization']?.replace('Bearer ', '');
-  if (!token) return res.status(401).json({ error: '未登录' });
+  if (!token) return null;
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
+    const payload = jwt.verify(token, JWT_SECRET);
+    const row = await db.prepare(`SELECT id, uid, nickname, role FROM users WHERE uid = ?`).get(payload.id);
+    if (!row) return null;
+    return { ...payload, uid: row.uid, dbId: row.id, nickname: row.nickname, role: row.role };
   } catch {
-    res.status(401).json({ error: '登录已过期' });
+    return null;
   }
 }
 
-function getCurrentUser(req) {
+async function auth(req, res, next) {
   const token = req.headers['authorization']?.replace('Bearer ', '');
-  if (!token) return null;
-  try { return jwt.verify(token, JWT_SECRET); } catch { return null; }
+  if (!token) return res.status(401).json({ error: '未登录' });
+  const user = await resolveUser(req);
+  if (!user) return res.status(401).json({ error: '登录已过期' });
+  req.user = user;
+  next();
 }
 
-function adminAuth(req, res, next) {
+async function getCurrentUser(req) {
+  return resolveUser(req);
+}
+
+async function adminAuth(req, res, next) {
   const token = req.headers['x-admin-token'];
   if (token === ADMIN_PASSWORD) return next();
-  const user = getCurrentUser(req);
+  const user = await getCurrentUser(req);
   if (user && user.role === 'admin') return next();
   res.status(401).json({ error: '无管理员权限' });
+}
+
+// 新用户 uid：Date.now() 十六进制补足 12 位 + 4 位随机十六进制（小写）
+function genUid() {
+  const ts = Date.now().toString(16).padStart(12, '0');
+  const rand = Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0');
+  return (ts + rand).slice(-16);
 }
 
 // ---------- Helper: notify ----------
@@ -109,7 +126,7 @@ async function notify(userId, type, fromUser, postId, content) {
 const PUBLIC_POST_FIELDS = `
   p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
   p.is_anonymous,
-  CASE WHEN p.is_anonymous THEN NULL ELSE p.user_id END AS user_id,
+  CASE WHEN p.is_anonymous THEN NULL ELSE u.uid END AS user_id,
   CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname
 `;
 
@@ -122,11 +139,12 @@ app.post('/api/auth/register', async (req, res) => {
   const exists = await db.prepare(`SELECT id FROM users WHERE username = ?`).get(username);
   if (exists) return res.status(400).json({ error: '用户名已被注册' });
   const hash = await bcrypt.hash(password, 10);
+  const uid = genUid();
   const result = await db.prepare(
-    `INSERT INTO users (username, password_hash, nickname) VALUES (?, ?, ?) RETURNING id`
-  ).run(username, hash, nickname || username);
-  const token = jwt.sign({ id: result.lastInsertRowid, username, nickname: nickname || username, role: 'user' }, JWT_SECRET, { expiresIn: '30d' });
-  res.json({ token, user: { id: result.lastInsertRowid, username, nickname: nickname || username, role: 'user' } });
+    `INSERT INTO users (username, password_hash, nickname, uid) VALUES (?, ?, ?, ?) RETURNING id`
+  ).run(username, hash, nickname || username, uid);
+  const token = jwt.sign({ id: uid, username, nickname: nickname || username, role: 'user' }, JWT_SECRET, { expiresIn: '30d' });
+  res.json({ token, user: { uid, username, nickname: nickname || username, role: 'user' } });
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -136,16 +154,16 @@ app.post('/api/auth/login', async (req, res) => {
   if (!user || !(await bcrypt.compare(password, user.password_hash))) {
     return res.status(400).json({ error: '用户名或密码错误' });
   }
-  const token = jwt.sign({ id: user.id, username: user.username, nickname: user.nickname, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
-  res.json({ token, user: { id: user.id, username: user.username, nickname: user.nickname, avatar: user.avatar, role: user.role } });
+  const token = jwt.sign({ id: user.uid, username: user.username, nickname: user.nickname, role: user.role }, JWT_SECRET, { expiresIn: '30d' });
+  res.json({ token, user: { uid: user.uid, username: user.username, nickname: user.nickname, avatar: user.avatar, role: user.role } });
 });
 
 app.get('/api/auth/me', auth, async (req, res) => {
   const user = await db.prepare(
-    `SELECT id, username, nickname, avatar, bio, role, created_at,
+    `SELECT uid, username, nickname, avatar, bio, role, created_at, profile_public,
             real_name, class_name, address, email, wechat, qq, phone
      FROM users WHERE id = ?`
-  ).get(req.user.id);
+  ).get(req.user.dbId);
   res.json(user);
 });
 
@@ -159,27 +177,45 @@ app.put('/api/auth/profile', auth, async (req, res) => {
       params.push(req.body[f] === null ? '' : String(req.body[f]));
     }
   }
+  if (req.body.profile_public !== undefined) {
+    sets.push('profile_public = ?');
+    params.push(req.body.profile_public === true || req.body.profile_public === 'true' || req.body.profile_public === 1);
+  }
   if (sets.length === 0) return res.json({ ok: true });
-  params.push(req.user.id);
+  params.push(req.user.dbId);
   await db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...params);
   res.json({ ok: true });
 });
 
-// User profile (public)
+// User profile (public) — :id 为对外 uid
 app.get('/api/users/:id', async (req, res) => {
-  const user = await db.prepare(`SELECT id, username, nickname, avatar, bio, created_at FROM users WHERE id = ?`).get(req.params.id);
+  const user = await db.prepare(
+    `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public FROM users WHERE uid = ?`
+  ).get(req.params.id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
-  const postCount = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE user_id = ? AND status = 'approved' AND is_anonymous = FALSE`).get(req.params.id)).c;
-  res.json({ ...user, postCount });
+  const postCount = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE user_id = ? AND status = 'approved' AND is_anonymous = FALSE`).get(user.id)).c;
+  const out = {
+    uid: user.uid, username: user.username, nickname: user.nickname, avatar: user.avatar,
+    bio: user.bio, created_at: user.created_at, profile_public: !!user.profile_public, postCount,
+  };
+  if (user.profile_public) {
+    const contact = await db.prepare(
+      `SELECT real_name, class_name, address, email, wechat, qq, phone FROM users WHERE id = ?`
+    ).get(user.id);
+    Object.assign(out, contact);
+  }
+  res.json(out);
 });
 
 // Follow / unfollow
 app.post('/api/users/:id/follow', auth, async (req, res) => {
-  if (req.user.id == req.params.id) return res.status(400).json({ error: '不能关注自己' });
+  const target = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(req.params.id);
+  if (!target) return res.status(404).json({ error: '用户不存在' });
+  if (req.user.uid === req.params.id) return res.status(400).json({ error: '不能关注自己' });
   const result = await db.prepare(`INSERT INTO follows (follower_id, following_id) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING id`)
-    .run(req.user.id, req.params.id);
+    .run(req.user.dbId, target.id);
   if (result.changes > 0) return res.json({ followed: true });
-  await db.prepare(`DELETE FROM follows WHERE follower_id = ? AND following_id = ?`).run(req.user.id, req.params.id);
+  await db.prepare(`DELETE FROM follows WHERE follower_id = ? AND following_id = ?`).run(req.user.dbId, target.id);
   res.json({ followed: false });
 });
 
@@ -190,8 +226,8 @@ app.get('/api/posts', async (req, res) => {
   let where = "WHERE p.status = 'approved'";
   const params = [];
   if (category && category !== 'all') { where += ' AND p.category = ?'; params.push(category); }
-  // 匿名帖不出现在任何用户主页，避免通过主页反推作者
-  if (userId) { where += ' AND p.user_id = ? AND p.is_anonymous = FALSE'; params.push(userId); }
+  // 匿名帖不出现在任何用户主页，避免通过主页反推作者（userId 为对外 uid）
+  if (userId) { where += ' AND p.user_id = (SELECT id FROM users WHERE uid = ?) AND p.is_anonymous = FALSE'; params.push(userId); }
   let orderBy = 'p.id DESC';
   if (sort === 'hot') orderBy = '(p.likes + p.views * 0.1) DESC';
 
@@ -201,7 +237,7 @@ app.get('/api/posts', async (req, res) => {
     where += ' AND (p.content ILIKE ? OR p.tags ILIKE ?)';
     params.push(`%${q}%`, `%${q}%`);
   }
-  sql = `SELECT ${PUBLIC_POST_FIELDS} FROM posts p ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
+  sql = `SELECT ${PUBLIC_POST_FIELDS} FROM posts p LEFT JOIN users u ON u.id = p.user_id ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
   params.push(Number(pageSize), offset);
 
   const totalSql = `SELECT COUNT(*) as c FROM posts p ${where}`;
@@ -215,16 +251,17 @@ app.get('/api/posts', async (req, res) => {
 app.get('/api/posts/hot', async (req, res) => {
   const posts = await db.prepare(
     `SELECT p.id, p.category, p.content, p.likes, p.views, p.is_anonymous,
-            CASE WHEN p.is_anonymous THEN NULL ELSE p.user_id END AS user_id,
+            CASE WHEN p.is_anonymous THEN NULL ELSE u.uid END AS user_id,
             CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname
-     FROM posts p WHERE p.status = 'approved' ORDER BY (p.likes + p.views * 0.1) DESC LIMIT 10`
+     FROM posts p LEFT JOIN users u ON u.id = p.user_id
+     WHERE p.status = 'approved' ORDER BY (p.likes + p.views * 0.1) DESC LIMIT 10`
   ).all();
   posts.forEach(p => { p.images = []; });
   res.json(posts);
 });
 
 app.get('/api/posts/:id', async (req, res) => {
-  const post = await db.prepare(`SELECT ${PUBLIC_POST_FIELDS} FROM posts p WHERE p.id = ?`).get(req.params.id);
+  const post = await db.prepare(`SELECT ${PUBLIC_POST_FIELDS} FROM posts p LEFT JOIN users u ON u.id = p.user_id WHERE p.id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
   post.images = post.images ? JSON.parse(post.images) : [];
   post.tags = post.tags ? JSON.parse(post.tags) : [];
@@ -232,12 +269,15 @@ app.get('/api/posts/:id', async (req, res) => {
   post.views += 1;
 
   const comments = await db.prepare(
-    `SELECT c.*, u.nickname as user_nickname, u.avatar FROM comments c LEFT JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.id ASC`
+    `SELECT c.id, c.post_id, c.parent_id, c.content, c.nickname, c.likes, c.created_at,
+            CASE WHEN c.user_id IS NULL THEN NULL ELSE u.uid END AS user_id,
+            u.nickname as user_nickname, u.avatar
+     FROM comments c LEFT JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.id ASC`
   ).all(req.params.id);
 
-  const user = getCurrentUser(req);
-  const liked = user ? !!(await db.prepare(`SELECT id FROM likes WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.id)) : false;
-  const favorited = user ? !!(await db.prepare(`SELECT id FROM favorites WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.id)) : false;
+  const user = await getCurrentUser(req);
+  const liked = user ? !!(await db.prepare(`SELECT id FROM likes WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.dbId)) : false;
+  const favorited = user ? !!(await db.prepare(`SELECT id FROM favorites WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.dbId)) : false;
 
   res.json({ post, comments, liked, favorited });
 });
@@ -268,7 +308,7 @@ app.post('/api/posts', auth, upload.array('images', 9), async (req, res) => {
     `INSERT INTO posts (user_id, category, content, tags, nickname, images, is_anonymous, client_ip, user_agent)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
   ).run(
-    req.user.id, category, content.trim(), JSON.stringify(tagArr), (nickname || req.user.nickname).trim(),
+    req.user.dbId, category, content.trim(), JSON.stringify(tagArr), (nickname || req.user.nickname).trim(),
     JSON.stringify(images), isAnonymous, clientIp, userAgent
   );
   res.json({ id: result.lastInsertRowid, message: '发布成功，等待管理员审核' });
@@ -277,7 +317,7 @@ app.post('/api/posts', auth, upload.array('images', 9), async (req, res) => {
 app.delete('/api/posts/:id', auth, async (req, res) => {
   const post = await db.prepare(`SELECT user_id, images FROM posts WHERE id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
-  if (post.user_id !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: '无权限' });
+  if (post.user_id !== req.user.dbId && req.user.role !== 'admin') return res.status(403).json({ error: '无权限' });
   if (post.images) {
     for (const img of JSON.parse(post.images)) {
       await fileStorage.deleteByUrl(img, uploadsDir);
@@ -289,7 +329,7 @@ app.delete('/api/posts/:id', auth, async (req, res) => {
 
 // ---------- Likes ----------
 app.post('/api/posts/:id/like', async (req, res) => {
-  const user = getCurrentUser(req);
+  const user = await getCurrentUser(req);
   const ip = req.headers['x-forwarded-for'] || req.ip || 'unknown';
   const post = await db.prepare(`SELECT id, user_id, nickname FROM posts WHERE id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
@@ -299,12 +339,12 @@ app.post('/api/posts/:id/like', async (req, res) => {
   let shouldNotify = false;
   await db.transaction(async (tx) => {
     if (user) {
-      const existing = await tx.prepare(`SELECT id FROM likes WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.id);
+      const existing = await tx.prepare(`SELECT id FROM likes WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.dbId);
       if (existing) {
-        await tx.prepare(`DELETE FROM likes WHERE post_id = ? AND user_id = ?`).run(req.params.id, user.id);
+        await tx.prepare(`DELETE FROM likes WHERE post_id = ? AND user_id = ?`).run(req.params.id, user.dbId);
         await tx.prepare(`UPDATE posts SET likes = likes - 1 WHERE id = ?`).run(req.params.id);
       } else {
-        await tx.prepare(`INSERT INTO likes (post_id, user_id, ip) VALUES (?, ?, ?) RETURNING id`).run(req.params.id, user.id, ip);
+        await tx.prepare(`INSERT INTO likes (post_id, user_id, ip) VALUES (?, ?, ?) RETURNING id`).run(req.params.id, user.dbId, ip);
         await tx.prepare(`UPDATE posts SET likes = likes + 1 WHERE id = ?`).run(req.params.id);
         liked = true;
         shouldNotify = true;
@@ -322,44 +362,46 @@ app.post('/api/posts/:id/like', async (req, res) => {
     }
     likes = (await tx.prepare(`SELECT likes FROM posts WHERE id = ?`).get(req.params.id)).likes;
   });
-  if (shouldNotify) await notify(post.user_id, 'like', user.nickname, post.id, '赞了你的帖子');
+  if (shouldNotify) await notify(post.user_id, 'like', user.uid, post.id, '赞了你的帖子');
   res.json({ liked, likes });
 });
 
 // ---------- Comments ----------
 app.post('/api/posts/:id/comments', async (req, res) => {
-  const { content, nickname, parentId } = req.body;
+  const { content, parentId } = req.body;
   if (!content || !content.trim()) return res.status(400).json({ error: '评论内容不能为空' });
   if (content.length > 500) return res.status(400).json({ error: '评论不能超过500字' });
   if (containsSensitive(content)) return res.status(400).json({ error: '评论包含违规词汇，请修改后再发布' });
   const post = await db.prepare(`SELECT id, user_id, nickname FROM posts WHERE id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
-  const user = getCurrentUser(req);
-  const nick = nickname || (user ? user.nickname : '匿名同学');
+  const user = await getCurrentUser(req);
+  // 昵称固定使用登录用户的当前昵称，未登录统一匿名
+  const nick = user ? user.nickname : '匿名同学';
   const result = await db.prepare(
     `INSERT INTO comments (post_id, user_id, parent_id, content, nickname) VALUES (?, ?, ?, ?, ?) RETURNING id`
-  ).run(req.params.id, user?.id || null, parentId || null, content.trim(), nick);
+  ).run(req.params.id, user?.dbId || null, parentId || null, content.trim(), nick);
+  const fromUid = user?.uid || null;
   if (parentId) {
     const parent = await db.prepare(`SELECT user_id, nickname FROM comments WHERE id = ?`).get(parentId);
-    if (parent) await notify(parent.user_id, 'comment_reply', nick, post.id, `回复了你的评论: ${content.slice(0, 30)}`);
+    if (parent) await notify(parent.user_id, 'comment_reply', fromUid, post.id, `回复了你的评论: ${content.slice(0, 30)}`);
   } else {
-    await notify(post.user_id, 'comment', nick, post.id, `评论了你的帖子: ${content.slice(0, 30)}`);
+    await notify(post.user_id, 'comment', fromUid, post.id, `评论了你的帖子: ${content.slice(0, 30)}`);
   }
   res.json({ id: result.lastInsertRowid });
 });
 
 app.post('/api/comments/:id/like', async (req, res) => {
-  const user = getCurrentUser(req);
+  const user = await getCurrentUser(req);
   const ip = req.headers['x-forwarded-for'] || req.ip || 'unknown';
   let likes = 0;
   await db.transaction(async (tx) => {
     const inserted = await tx.prepare(
       `INSERT INTO comment_likes (comment_id, user_id, ip) VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING id`
-    ).run(req.params.id, user?.id || null, ip);
+    ).run(req.params.id, user?.dbId || null, ip);
     if (inserted.changes > 0) {
       await tx.prepare(`UPDATE comments SET likes = likes + 1 WHERE id = ?`).run(req.params.id);
     } else {
-      await tx.prepare(`DELETE FROM comment_likes WHERE comment_id = ? AND (user_id = ? OR ip = ?)`).run(req.params.id, user?.id || null, ip);
+      await tx.prepare(`DELETE FROM comment_likes WHERE comment_id = ? AND (user_id = ? OR ip = ?)`).run(req.params.id, user?.dbId || null, ip);
       await tx.prepare(`UPDATE comments SET likes = likes - 1 WHERE id = ?`).run(req.params.id);
     }
     likes = (await tx.prepare(`SELECT likes FROM comments WHERE id = ?`).get(req.params.id)).likes;
@@ -372,12 +414,12 @@ app.post('/api/posts/:id/favorite', auth, async (req, res) => {
   const post = await db.prepare(`SELECT id FROM posts WHERE id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
   const favorited = await db.transaction(async (tx) => {
-    const existing = await tx.prepare(`SELECT id FROM favorites WHERE user_id = ? AND post_id = ?`).get(req.user.id, req.params.id);
+    const existing = await tx.prepare(`SELECT id FROM favorites WHERE user_id = ? AND post_id = ?`).get(req.user.dbId, req.params.id);
     if (existing) {
-      await tx.prepare(`DELETE FROM favorites WHERE user_id = ? AND post_id = ?`).run(req.user.id, req.params.id);
+      await tx.prepare(`DELETE FROM favorites WHERE user_id = ? AND post_id = ?`).run(req.user.dbId, req.params.id);
       return false;
     }
-    await tx.prepare(`INSERT INTO favorites (user_id, post_id) VALUES (?, ?) RETURNING id`).run(req.user.id, req.params.id);
+    await tx.prepare(`INSERT INTO favorites (user_id, post_id) VALUES (?, ?) RETURNING id`).run(req.user.dbId, req.params.id);
     return true;
   });
   res.json({ favorited });
@@ -386,8 +428,9 @@ app.post('/api/posts/:id/favorite', auth, async (req, res) => {
 app.get('/api/favorites', auth, async (req, res) => {
   const posts = await db.prepare(
     `SELECT ${PUBLIC_POST_FIELDS} FROM posts p JOIN favorites f ON f.post_id = p.id
+     LEFT JOIN users u ON u.id = p.user_id
      WHERE f.user_id = ? AND p.status = 'approved' ORDER BY f.id DESC`
-  ).all(req.user.id);
+  ).all(req.user.dbId);
   posts.forEach(p => { p.images = p.images ? JSON.parse(p.images) : []; });
   res.json(posts);
 });
@@ -396,27 +439,29 @@ app.get('/api/favorites', auth, async (req, res) => {
 app.post('/api/reports', async (req, res) => {
   const { postId, commentId, reason } = req.body;
   if (!reason) return res.status(400).json({ error: '请填写举报原因' });
-  const user = getCurrentUser(req);
+  const user = await getCurrentUser(req);
   await db.prepare(`INSERT INTO reports (post_id, comment_id, user_id, reason) VALUES (?, ?, ?, ?) RETURNING id`)
-    .run(postId || null, commentId || null, user?.id || null, reason);
+    .run(postId || null, commentId || null, user?.dbId || null, reason);
   res.json({ ok: true, message: '举报已提交，管理员会尽快处理' });
 });
 
 // ---------- Notifications ----------
 app.get('/api/notifications', auth, async (req, res) => {
   const list = await db.prepare(
-    `SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT 50`
-  ).all(req.user.id);
+    `SELECT n.*, COALESCE(u.nickname, n.from_user) AS from_nickname
+     FROM notifications n LEFT JOIN users u ON u.uid = n.from_user
+     WHERE n.user_id = ? ORDER BY n.id DESC LIMIT 50`
+  ).all(req.user.dbId);
   res.json(list);
 });
 
 app.get('/api/notifications/unread', auth, async (req, res) => {
-  const count = (await db.prepare(`SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND is_read = 0`).get(req.user.id)).c;
+  const count = (await db.prepare(`SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND is_read = 0`).get(req.user.dbId)).c;
   res.json({ count });
 });
 
 app.post('/api/notifications/read', auth, async (req, res) => {
-  await db.prepare(`UPDATE notifications SET is_read = 1 WHERE user_id = ?`).run(req.user.id);
+  await db.prepare(`UPDATE notifications SET is_read = 1 WHERE user_id = ?`).run(req.user.dbId);
   res.json({ ok: true });
 });
 
@@ -430,19 +475,166 @@ app.post('/api/upload/avatar', auth, upload.single('avatar'), async (req, res) =
     console.error('头像上传失败:', e.message);
     return res.status(500).json({ error: '头像上传失败' });
   }
-  await db.prepare(`UPDATE users SET avatar = ? WHERE id = ?`).run(url, req.user.id);
+  await db.prepare(`UPDATE users SET avatar = ? WHERE id = ?`).run(url, req.user.dbId);
   res.json({ url });
 });
 
+// ---------- Friends ----------
+app.get('/api/friends', auth, async (req, res) => {
+  const list = await db.prepare(
+    `SELECT u.uid, u.nickname, u.avatar, u.bio
+     FROM friends f
+     JOIN users u ON u.uid = CASE WHEN f.requester_uid = ? THEN f.addressee_uid ELSE f.requester_uid END
+     WHERE f.status = 'accepted' AND (f.requester_uid = ? OR f.addressee_uid = ?)
+     ORDER BY f.id DESC`
+  ).all(req.user.uid, req.user.uid, req.user.uid);
+  res.json(list);
+});
+
+app.get('/api/friends/requests', auth, async (req, res) => {
+  const list = await db.prepare(
+    `SELECT u.uid, u.nickname, u.avatar, u.bio, f.created_at
+     FROM friends f JOIN users u ON u.uid = f.requester_uid
+     WHERE f.addressee_uid = ? AND f.status = 'pending'
+     ORDER BY f.id DESC`
+  ).all(req.user.uid);
+  res.json(list);
+});
+
+app.post('/api/friends/request/:uid', auth, async (req, res) => {
+  const targetUid = req.params.uid;
+  if (targetUid === req.user.uid) return res.status(400).json({ error: '不能添加自己为好友' });
+  const target = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(targetUid);
+  if (!target) return res.status(404).json({ error: '用户不存在' });
+  const existing = await db.prepare(
+    `SELECT * FROM friends WHERE (requester_uid = ? AND addressee_uid = ?) OR (requester_uid = ? AND addressee_uid = ?)`
+  ).get(req.user.uid, targetUid, targetUid, req.user.uid);
+  if (existing) {
+    if (existing.status === 'accepted') return res.json({ status: 'accepted' });
+    if (existing.requester_uid === req.user.uid) return res.json({ status: 'pending' });
+    // 对方已向我发过请求，直接成为好友
+    await db.prepare(`UPDATE friends SET status = 'accepted' WHERE id = ?`).run(existing.id);
+    return res.json({ status: 'accepted' });
+  }
+  await db.prepare(`INSERT INTO friends (requester_uid, addressee_uid) VALUES (?, ?) RETURNING id`).run(req.user.uid, targetUid);
+  await notify(target.id, 'friend_request', req.user.uid, null, null);
+  res.json({ status: 'pending' });
+});
+
+app.post('/api/friends/accept/:uid', auth, async (req, res) => {
+  const result = await db.prepare(
+    `UPDATE friends SET status = 'accepted' WHERE requester_uid = ? AND addressee_uid = ? AND status = 'pending'`
+  ).run(req.params.uid, req.user.uid);
+  if (result.changes === 0) return res.status(404).json({ error: '没有待处理的好友请求' });
+  res.json({ ok: true });
+});
+
+app.delete('/api/friends/:uid', auth, async (req, res) => {
+  await db.prepare(
+    `DELETE FROM friends WHERE (requester_uid = ? AND addressee_uid = ?) OR (requester_uid = ? AND addressee_uid = ?)`
+  ).run(req.user.uid, req.params.uid, req.params.uid, req.user.uid);
+  res.json({ ok: true });
+});
+
+// ---------- Messages ----------
+app.get('/api/messages/conversations', auth, async (req, res) => {
+  const rows = await db.prepare(
+    `SELECT * FROM messages WHERE from_uid = ? OR to_uid = ? ORDER BY id DESC`
+  ).all(req.user.uid, req.user.uid);
+
+  const peers = [];
+  const map = new Map();
+  for (const m of rows) {
+    const peer = m.from_uid === req.user.uid ? m.to_uid : m.from_uid;
+    if (!map.has(peer)) {
+      map.set(peer, { uid: peer, last_content: m.content, last_time: m.created_at, unread: 0 });
+      peers.push(peer);
+    }
+    if (m.to_uid === req.user.uid && m.from_uid === peer && !m.read) map.get(peer).unread += 1;
+  }
+
+  if (peers.length > 0) {
+    const placeholders = peers.map(() => '?').join(', ');
+    const users = await db.prepare(`SELECT uid, nickname, avatar FROM users WHERE uid IN (${placeholders})`).all(...peers);
+    const userMap = new Map(users.map((u) => [u.uid, u]));
+    for (const c of map.values()) {
+      const u = userMap.get(c.uid);
+      c.nickname = u ? u.nickname : '';
+      c.avatar = u ? u.avatar : null;
+    }
+  }
+  res.json([...map.values()]);
+});
+
+app.get('/api/messages/:uid', auth, async (req, res) => {
+  const peerUid = req.params.uid;
+  if (peerUid === req.user.uid) return res.status(400).json({ error: '不能和自己私信' });
+  const peer = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(peerUid);
+  if (!peer) return res.status(404).json({ error: '用户不存在' });
+  await db.prepare(`UPDATE messages SET read = TRUE WHERE from_uid = ? AND to_uid = ? AND read = FALSE`).run(peerUid, req.user.uid);
+  const list = await db.prepare(
+    `SELECT id, from_uid, to_uid, content, read, created_at FROM messages
+     WHERE (from_uid = ? AND to_uid = ?) OR (from_uid = ? AND to_uid = ?)
+     ORDER BY id ASC`
+  ).all(req.user.uid, peerUid, peerUid, req.user.uid);
+  res.json(list);
+});
+
+app.post('/api/messages', auth, async (req, res) => {
+  const { to, content } = req.body;
+  if (!to) return res.status(400).json({ error: '请选择接收者' });
+  if (!content || !String(content).trim()) return res.status(400).json({ error: '消息内容不能为空' });
+  if (to === req.user.uid) return res.status(400).json({ error: '不能给自己发私信' });
+  const peer = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(to);
+  if (!peer) return res.status(404).json({ error: '用户不存在' });
+  const text = String(content).trim();
+  const result = await db.prepare(
+    `INSERT INTO messages (from_uid, to_uid, content) VALUES (?, ?, ?) RETURNING id`
+  ).run(req.user.uid, to, text);
+  await notify(peer.id, 'message', req.user.uid, null, text.slice(0, 60));
+  res.json({ id: result.lastInsertRowid });
+});
+
 // ---------- Admin ----------
+app.post('/api/admin/notify', adminAuth, async (req, res) => {
+  const { uids, all, content } = req.body;
+  if (!content || !String(content).trim()) return res.status(400).json({ error: '通知内容不能为空' });
+  const text = String(content).trim();
+  let sent = 0;
+  if (all) {
+    const result = await db.prepare(
+      `INSERT INTO notifications (user_id, type, from_user, content)
+       SELECT id, 'system', 'system', ? FROM users RETURNING id`
+    ).run(text);
+    sent = result.changes;
+  } else {
+    if (!Array.isArray(uids) || uids.length === 0) return res.status(400).json({ error: '请提供接收用户 uid' });
+    for (const uid of uids) {
+      if (typeof uid !== 'string' || !uid.trim()) continue;
+      const result = await db.prepare(
+        `INSERT INTO notifications (user_id, type, from_user, content)
+         SELECT id, 'system', 'system', ? FROM users WHERE uid = ? RETURNING id`
+      ).run(text, uid.trim());
+      sent += result.changes;
+    }
+  }
+  res.json({ sent });
+});
+
 app.get('/api/admin/posts', adminAuth, async (req, res) => {
   const { status, page = 1, pageSize = 50 } = req.query;
   const offset = (Number(page) - 1) * Number(pageSize);
   let where = '';
   const params = [];
-  if (status && status !== 'all') { where = 'WHERE status = ?'; params.push(status); }
-  const total = (await db.prepare(`SELECT COUNT(*) as c FROM posts ${where}`).get(...params)).c;
-  const posts = await db.prepare(`SELECT * FROM posts ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, Number(pageSize), offset);
+  if (status && status !== 'all') { where = 'WHERE p.status = ?'; params.push(status); }
+  const total = (await db.prepare(`SELECT COUNT(*) as c FROM posts p ${where}`).get(...params)).c;
+  const posts = await db.prepare(
+    `SELECT p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
+            p.is_anonymous, p.nickname, p.client_ip, p.user_agent,
+            CASE WHEN p.user_id IS NULL THEN NULL ELSE u.uid END AS user_id
+     FROM posts p LEFT JOIN users u ON u.id = p.user_id
+     ${where} ORDER BY p.id DESC LIMIT ? OFFSET ?`
+  ).all(...params, Number(pageSize), offset);
   posts.forEach(p => { p.images = p.images ? JSON.parse(p.images) : []; p.tags = p.tags ? JSON.parse(p.tags) : []; });
   res.json({ total, posts });
 });
@@ -453,12 +645,14 @@ app.get('/api/admin/posts/:id', adminAuth, async (req, res) => {
   post.images = post.images ? JSON.parse(post.images) : [];
   post.tags = post.tags ? JSON.parse(post.tags) : [];
 
-  const author = post.user_id
+  const authorId = post.user_id;
+  const author = authorId
     ? await db.prepare(
-        `SELECT id, username, nickname, avatar, real_name, class_name, address, email, wechat, qq, phone, created_at
+        `SELECT id, uid, username, nickname, avatar, real_name, class_name, address, email, wechat, qq, phone, created_at
          FROM users WHERE id = ?`
-      ).get(post.user_id)
+      ).get(authorId)
     : null;
+  post.user_id = author ? author.uid : null;
   const commentCount = (await db.prepare(`SELECT COUNT(*) as c FROM comments WHERE post_id = ?`).get(req.params.id)).c;
 
   res.json({
@@ -522,18 +716,18 @@ app.put('/api/admin/reports/:id', adminAuth, async (req, res) => {
 });
 
 app.get('/api/admin/users', adminAuth, async (req, res) => {
-  const users = await db.prepare(`SELECT id, username, nickname, avatar, role, created_at FROM users ORDER BY id DESC`).all();
+  const users = await db.prepare(`SELECT uid, username, nickname, avatar, role, created_at FROM users ORDER BY id DESC`).all();
   res.json(users);
 });
 
 app.put('/api/admin/users/:id', adminAuth, async (req, res) => {
   const { role } = req.body;
-  await db.prepare(`UPDATE users SET role = ? WHERE id = ?`).run(role, req.params.id);
+  await db.prepare(`UPDATE users SET role = ? WHERE uid = ?`).run(role, req.params.id);
   res.json({ ok: true });
 });
 
 app.delete('/api/admin/users/:id', adminAuth, async (req, res) => {
-  await db.prepare(`DELETE FROM users WHERE id = ?`).run(req.params.id);
+  await db.prepare(`DELETE FROM users WHERE uid = ?`).run(req.params.id);
   res.json({ ok: true });
 });
 

@@ -49,8 +49,8 @@ export const api = {
   getFavorites: () => request('/favorites'),
 
   // Comments
-  addComment: (id, content, nickname, parentId) =>
-    request(`/posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content, nickname, parentId }) }),
+  addComment: (id, content, parentId) =>
+    request(`/posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content, parentId }) }),
   likeComment: (id) => request(`/comments/${id}/like`, { method: 'POST' }),
 
   // Reports
@@ -61,6 +61,19 @@ export const api = {
   getNotifications: () => request('/notifications'),
   getUnreadCount: () => request('/notifications/unread'),
   markAllRead: () => request('/notifications/read', { method: 'POST' }),
+
+  // Friends
+  getFriends: () => request('/friends'),
+  getFriendRequests: () => request('/friends/requests'),
+  requestFriend: (uid) => request(`/friends/request/${uid}`, { method: 'POST' }),
+  acceptFriend: (uid) => request(`/friends/accept/${uid}`, { method: 'POST' }),
+  removeFriend: (uid) => request(`/friends/${uid}`, { method: 'DELETE' }),
+
+  // Messages
+  getConversations: () => request('/messages/conversations'),
+  getConversation: (uid) => request(`/messages/${uid}`),
+  sendMessage: (to, content) =>
+    request('/messages', { method: 'POST', body: JSON.stringify({ to, content }) }),
 
   // Upload
   uploadAvatar: (file) => {
@@ -99,6 +112,8 @@ export const api = {
     request(`/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ role }), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   deleteUser: (id) =>
     request(`/admin/users/${id}`, { method: 'DELETE', headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  notifyUsers: (payload) =>
+    request('/admin/notify', { method: 'POST', body: JSON.stringify(payload), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
 };
 
 export const CATEGORIES = [

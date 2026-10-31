@@ -11,7 +11,6 @@ export default function PostDetail() {
   const [comments, setComments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [comment, setComment] = useState('');
-  const [nickname, setNickname] = useState('');
   const [submitLoading, setSubmitLoading] = useState(false);
   const [modalImg, setModalImg] = useState(null);
   const [liked, setLiked] = useState(false);
@@ -57,7 +56,7 @@ export default function PostDetail() {
     if (!comment.trim()) return;
     setSubmitLoading(true);
     try {
-      await api.addComment(id, comment, nickname);
+      await api.addComment(id, comment);
       setComment('');
       load();
     } catch (e) { alert(e.message); }
@@ -67,7 +66,7 @@ export default function PostDetail() {
   const submitReply = async (parentId) => {
     if (!replyText.trim()) return;
     try {
-      await api.addComment(id, replyText, user?.nickname || nickname, parentId);
+      await api.addComment(id, replyText, parentId);
       setReplyTo(null);
       setReplyText('');
       load();
@@ -165,8 +164,10 @@ export default function PostDetail() {
               </div>
             </div>
           ))}
+          <p className="anon-hint" style={{ marginTop: 12 }}>
+            {user ? `以「${user.nickname}」的身份评论` : '将以匿名身份评论'}
+          </p>
           <form className="comment-form" onSubmit={submitComment}>
-            <input type="text" placeholder="你的昵称（可选）" value={nickname} onChange={(e) => setNickname(e.target.value)} style={{ maxWidth: 140 }} />
             <input type="text" placeholder="写下你的评论..." value={comment} onChange={(e) => setComment(e.target.value)} />
             <button type="button" className="btn btn-secondary" style={{ padding: '0 12px' }} onClick={() => setShowEmoji(!showEmoji)}>😊</button>
             <button className="btn btn-primary" type="submit" disabled={submitLoading || !comment.trim()}>{submitLoading ? '...' : '发送'}</button>

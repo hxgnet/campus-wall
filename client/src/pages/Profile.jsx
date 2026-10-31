@@ -24,6 +24,8 @@ export default function Profile() {
   const [editing, setEditing] = useState(false);
   const [nickname, setNickname] = useState('');
   const [bio, setBio] = useState('');
+  const [profilePublic, setProfilePublic] = useState(false);
+  const [friendStatus, setFriendStatus] = useState('none');
   const [extra, setExtra] = useState({
     real_name: '', class_name: '', address: '', email: '', wechat: '', qq: '', phone: '',
   });
@@ -33,10 +35,11 @@ export default function Profile() {
       setProfile(u);
       setNickname(u.nickname);
       setBio(u.bio || '');
-      setIsMe(user && user.id == id);
+      setProfilePublic(!!u.profile_public);
+      setIsMe(user && user.uid === id);
     }).catch(() => {});
     api.getPosts({ userId: id, pageSize: 50 }).then((d) => setPosts(d.posts)).catch(() => {});
-    if (user && user.id == id) {
+    if (user && user.uid === id) {
       api.me().then((me) => setExtra({
         real_name: me.real_name || '',
         class_name: me.class_name || '',
@@ -49,12 +52,26 @@ export default function Profile() {
     }
   }, [id, user]);
 
+  useEffect(() => {
+    if (!user || user.uid === id) return;
+    api.getFriends()
+      .then((list) => setFriendStatus(list.some((f) => f.uid === id) ? 'friend' : 'none'))
+      .catch(() => {});
+  }, [user, id]);
+
   const saveProfile = async () => {
     try {
-      await api.updateProfile({ nickname, bio, ...extra });
+      await api.updateProfile({ nickname, bio, profile_public: profilePublic, ...extra });
       if (isMe) updateUser({ ...user, nickname, bio });
-      setProfile({ ...profile, nickname, bio });
+      setProfile({ ...profile, nickname, bio, profile_public: profilePublic, ...extra });
       setEditing(false);
+    } catch (e) { alert(e.message); }
+  };
+
+  const addFriend = async () => {
+    try {
+      const r = await api.requestFriend(id);
+      setFriendStatus(r.status === 'accepted' ? 'friend' : 'requested');
     } catch (e) { alert(e.message); }
   };
 
@@ -92,7 +109,11 @@ export default function Profile() {
                   </div>
                 ))}
               </div>
-              <p className="anon-hint">以上资料均为选填，仅管理员核查时可见，不会公开展示。</p>
+              <label className="anon-toggle" style={{ justifyContent: 'center', marginBottom: 8 }}>
+                <input type="checkbox" checked={profilePublic} onChange={(e) => setProfilePublic(e.target.checked)} />
+                <span>公开我的资料（含联系方式）</span>
+              </label>
+              <p className="anon-hint">以上资料均为选填；开启公开后其他同学可在你的主页看到，否则仅管理员核查时可见。</p>
               <button className="btn btn-primary" style={{ marginRight: 8 }} onClick={saveProfile}>保存</button>
               <button className="btn btn-secondary" onClick={() => setEditing(false)}>取消</button>
             </div>
@@ -104,9 +125,38 @@ export default function Profile() {
                 帖子 {posts.length} · 加入于 {profile.created_at?.slice(0, 10)}
               </p>
               {isMe && <button className="btn btn-secondary" style={{ marginTop: 12 }} onClick={() => setEditing(true)}>编辑资料</button>}
+              {!isMe && user && (
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 12, flexWrap: 'wrap' }}>
+                  {friendStatus === 'friend' ? (
+                    <button className="btn btn-secondary" disabled>已是好友</button>
+                  ) : friendStatus === 'requested' ? (
+                    <button className="btn btn-secondary" disabled>已发送请求</button>
+                  ) : (
+                    <button className="btn btn-primary" onClick={addFriend}>加好友</button>
+                  )}
+                  <button className="btn btn-secondary" onClick={() => navigate(`/messages/${id}`)}>发私信</button>
+                </div>
+              )}
             </div>
           )}
         </div>
+        {!isMe && (
+          <div className="detail-card" style={{ marginBottom: 16 }}>
+            {profile.profile_public ? (
+              <>
+                <h3 style={{ fontSize: 15, marginBottom: 10 }}>联系方式</h3>
+                <div className="profile-fields">
+                  {PRIVATE_FIELDS.map((f) => (
+                    <div className="profile-field" key={f.key}>
+                      <label>{f.label}</label>
+                      <div style={{ fontSize: 14, wordBreak: 'break-word' }}>{profile[f.key] || '—'}</div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : <p className="anon-hint">该用户未公开资料</p>}
+          </div>
+        )}
         <h3 style={{ marginBottom: 12 }}>TA 的帖子</h3>
         {posts.length === 0 ? (
           <div className="empty"><div className="empty-icon">📭</div><div>暂无帖子</div></div>

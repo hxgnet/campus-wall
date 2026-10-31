@@ -11,6 +11,7 @@ import Login from './pages/Login.jsx';
 import Profile from './pages/Profile.jsx';
 import Notifications from './pages/Notifications.jsx';
 import Favorites from './pages/Favorites.jsx';
+import Messages from './pages/Messages.jsx';
 
 export default function App() {
   return (
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/profile/:id" element={<Profile />} />
           <Route path="/notifications" element={<Notifications />} />
+          <Route path="/messages/:uid" element={<Messages />} />
           <Route path="/favorites" element={<Favorites />} />
           <Route path="/admin" element={<Admin />} />
         </Routes>

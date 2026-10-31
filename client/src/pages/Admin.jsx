@@ -14,6 +14,11 @@ export default function Admin() {
   const [users, setUsers] = useState([]);
   const [detail, setDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [notifyContent, setNotifyContent] = useState('');
+  const [notifyAll, setNotifyAll] = useState(true);
+  const [notifyUids, setNotifyUids] = useState('');
+  const [notifyResult, setNotifyResult] = useState('');
+  const [notifySending, setNotifySending] = useState(false);
 
   const load = async () => {
     if (tab === 'posts') {
@@ -74,13 +79,30 @@ export default function Admin() {
 
   const delUser = async (id) => {
     if (!confirm('确定删除该用户？')) return;
-    try { await api.deleteUser(id); setUsers((prev) => prev.filter((u) => u.id !== id)); }
+    try { await api.deleteUser(id); setUsers((prev) => prev.filter((u) => u.uid !== id)); }
     catch (e) { alert(e.message); }
   };
 
   const setUserRole = async (id, role) => {
-    try { await api.updateUserRole(id, role); setUsers((prev) => prev.map((u) => u.id === id ? { ...u, role } : u)); }
+    try { await api.updateUserRole(id, role); setUsers((prev) => prev.map((u) => u.uid === id ? { ...u, role } : u)); }
     catch (e) { alert(e.message); }
+  };
+
+  const sendNotify = async (e) => {
+    e.preventDefault();
+    if (!notifyContent.trim()) { alert('请输入通知内容'); return; }
+    const uids = notifyUids.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+    if (!notifyAll && uids.length === 0) { alert('请输入接收用户 uid'); return; }
+    setNotifySending(true);
+    try {
+      const r = await api.notifyUsers(
+        notifyAll ? { all: true, content: notifyContent.trim() } : { all: false, uids, content: notifyContent.trim() }
+      );
+      setNotifyResult(`已发送给 ${r.sent} 位用户`);
+      setNotifyContent('');
+      if (!notifyAll) setNotifyUids('');
+    } catch (err) { alert(err.message); }
+    finally { setNotifySending(false); }
   };
 
   const handleReport = async (id, status) => {
@@ -131,6 +153,7 @@ export default function Admin() {
             { k: 'posts', l: '📝 帖子审核' },
             { k: 'reports', l: '🚩 举报处理' },
             { k: 'users', l: '👥 用户管理' },
+            { k: 'notify', l: '📢 发送通知' },
           ].map((t) => (
             <button key={t.k} className={`cat-tab ${tab === t.k ? 'active' : ''}`} onClick={() => setTab(t.k)}>{t.l}</button>
           ))}
@@ -205,22 +228,49 @@ export default function Admin() {
           users.length === 0 ? (
             <div className="empty"><div className="empty-icon">👥</div><div>暂无用户</div></div>
           ) : users.map((u) => (
-            <div className="admin-post" key={u.id}>
+            <div className="admin-post" key={u.uid}>
               <div className="admin-post-head">
                 <span style={{ fontWeight: 600 }}>{u.nickname} <span style={{ color: 'var(--text-light)', fontWeight: 400 }}>(@{u.username})</span></span>
                 <span className={`status-badge ${u.role === 'admin' ? 'status-approved' : 'status-pending'}`}>{u.role === 'admin' ? '管理员' : '普通用户'}</span>
                 <span className="post-time">{u.created_at}</span>
               </div>
+              <div className="post-time" style={{ marginBottom: 4 }}>UID: {u.uid}</div>
               <div className="admin-actions">
                 {u.role === 'admin' ? (
-                  <button className="btn-secondary" onClick={() => setUserRole(u.id, 'user')}>取消管理员</button>
+                  <button className="btn-secondary" onClick={() => setUserRole(u.uid, 'user')}>取消管理员</button>
                 ) : (
-                  <button className="btn-success" onClick={() => setUserRole(u.id, 'admin')}>设为管理员</button>
+                  <button className="btn-success" onClick={() => setUserRole(u.uid, 'admin')}>设为管理员</button>
                 )}
-                <button className="btn-danger" onClick={() => delUser(u.id)}>删除用户</button>
+                <button className="btn-danger" onClick={() => delUser(u.uid)}>删除用户</button>
               </div>
             </div>
           ))
+        )}
+
+        {tab === 'notify' && (
+          <form className="admin-post" onSubmit={sendNotify}>
+            <h3 style={{ fontSize: 15, marginBottom: 10 }}>📢 发送通知</h3>
+            <div className="form-group">
+              <textarea className="form-textarea" placeholder="输入通知内容..." value={notifyContent} onChange={(e) => setNotifyContent(e.target.value)} />
+            </div>
+            <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginBottom: 10, fontSize: 14 }}>
+              <label className="anon-toggle">
+                <input type="radio" checked={notifyAll} onChange={() => setNotifyAll(true)} />
+                <span>全部用户</span>
+              </label>
+              <label className="anon-toggle">
+                <input type="radio" checked={!notifyAll} onChange={() => setNotifyAll(false)} />
+                <span>指定用户</span>
+              </label>
+            </div>
+            {!notifyAll && (
+              <div className="form-group">
+                <input className="form-input" placeholder="输入 uid，逗号或空格分隔" value={notifyUids} onChange={(e) => setNotifyUids(e.target.value)} />
+              </div>
+            )}
+            <button type="submit" className="btn btn-primary" disabled={notifySending}>{notifySending ? '发送中...' : '发送'}</button>
+            {notifyResult && <p className="anon-hint" style={{ color: 'var(--success)' }}>{notifyResult}</p>}
+          </form>
         )}
       </div>
       {modalImg && <div className="image-modal" onClick={() => setModalImg(null)}><img src={modalImg} alt="" /></div>}
