@@ -1,0 +1,14 @@
+{
+  "installCommand": "npm ci --prefix server --no-audit --no-fund && npm ci --prefix client --no-audit --no-fund",
+  "buildCommand": "npm --prefix client run build",
+  "outputDirectory": "client/dist",
+  "functions": {
+    "api/[...slug].js": {
+      "memory": 1024,
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

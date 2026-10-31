@@ -53808,7 +53808,7 @@ var require_server = __commonJS({
     });
     var upload = multer({
       storage,
-      limits: { fileSize: 8 * 1024 * 1024 },
+      limits: { fileSize: 4 * 1024 * 1024 },
       fileFilter: (req, file, cb) => {
         if (/^image\//.test(file.mimetype)) cb(null, true);
         else cb(new Error("\u53EA\u5141\u8BB8\u4E0A\u4F20\u56FE\u7247\u6587\u4EF6"));
