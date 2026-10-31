@@ -54504,6 +54504,7 @@ var require_server = __commonJS({
       res.json({ ok: true });
     });
     app2.delete("/api/admin/posts/:id", superAuth, async (req, res) => {
+      if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
       const post = await db.prepare(`SELECT id, user_id, category, content, images FROM posts WHERE id = ?`).get(req.params.id);
       if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
       let authorName = "\u5DF2\u6CE8\u9500\u7528\u6237";

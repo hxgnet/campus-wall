@@ -792,6 +792,7 @@ app.put('/api/admin/posts/:id', adminAuth, async (req, res) => {
 });
 
 app.delete('/api/admin/posts/:id', superAuth, async (req, res) => {
+  if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ error: '帖子不存在' });
   const post = await db.prepare(`SELECT id, user_id, category, content, images FROM posts WHERE id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
   let authorName = '已注销用户';
