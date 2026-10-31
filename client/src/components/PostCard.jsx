@@ -27,6 +27,7 @@ export default function PostCard({ post, onLikeChange }) {
     <div className="post-card" onClick={() => navigate(`/post/${post.id}`)}>
       <div className="post-meta">
         <span className={`post-cat cat-${post.category}`}>{post.category}</span>
+        {post.is_anonymous && <span className="anon-badge">匿名</span>}
         <span className="post-time">{post.created_at}</span>
       </div>
       <div className="post-content">{post.content}</div>
@@ -47,7 +48,7 @@ export default function PostCard({ post, onLikeChange }) {
         <span className="post-action"><span>💬</span><span>评论</span></span>
         <span className="post-action"><span>👁️</span><span>{post.views || 0}</span></span>
         <button className="post-action" onClick={share}><span>🔗</span></button>
-        <span className="post-nick" style={{ marginLeft: 'auto' }}>@{post.nickname}</span>
+        <span className="post-nick" style={{ marginLeft: 'auto' }}>{post.is_anonymous ? '🎭 匿名同学' : `@${post.nickname}`}</span>
       </div>
     </div>
   );

@@ -84,6 +84,8 @@ export const api = {
     request(`/admin/posts?status=${status}&page=${page}&pageSize=${pageSize}`, {
       headers: { 'x-admin-token': localStorage.getItem('admin_token') },
     }),
+  getPostAdmin: (id) =>
+    request(`/admin/posts/${id}`, { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   updatePostStatus: (id, status) =>
     request(`/admin/posts/${id}`, { method: 'PUT', body: JSON.stringify({ status }), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   deletePost: (id) =>

@@ -9,6 +9,7 @@ export default function CreatePost() {
   const [category, setCategory] = useState(CATEGORIES[0].name);
   const [content, setContent] = useState('');
   const [nickname, setNickname] = useState('');
+  const [anonymous, setAnonymous] = useState(false);
   const [tagInput, setTagInput] = useState('');
   const [tags, setTags] = useState([]);
   const [images, setImages] = useState([]);
@@ -54,6 +55,7 @@ export default function CreatePost() {
       fd.append('category', category);
       fd.append('content', content);
       fd.append('nickname', nickname || user.nickname);
+      fd.append('anonymous', anonymous ? 'true' : 'false');
       fd.append('tags', JSON.stringify(tags));
       images.forEach((img) => fd.append('images', img.file));
       const res = await api.createPost(fd);
@@ -127,6 +129,14 @@ export default function CreatePost() {
           <div className="form-group">
             <label className="form-label">昵称（默认使用你的账号昵称）</label>
             <input className="form-input" placeholder={user.nickname} value={nickname} onChange={(e) => setNickname(e.target.value)} maxLength={20} />
+          </div>
+
+          <div className="form-group">
+            <label className="anon-toggle">
+              <input type="checkbox" checked={anonymous} onChange={(e) => setAnonymous(e.target.checked)} />
+              <span>匿名发布（管理员仍可见真实身份）</span>
+            </label>
+            <p className="anon-hint">开启后其他同学只会看到「匿名同学」，看不到你的昵称与主页入口；管理员仍可核查真实身份。</p>
           </div>
 
           <button type="submit" className="btn btn-primary btn-block" disabled={loading}>{loading ? '发布中...' : '发布帖子'}</button>

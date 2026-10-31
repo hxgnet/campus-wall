@@ -103,6 +103,16 @@ async function notify(userId, type, fromUser, postId, content) {
   ).run(userId, type, fromUser, postId, content);
 }
 
+// ---------- Helper: 公开帖子字段 ----------
+// 匿名帖在 SQL 层直接脱敏：user_id 置 NULL、昵称固定为「匿名同学」；
+// 同时不返回 client_ip / user_agent，避免隐私信息流向公开接口。
+const PUBLIC_POST_FIELDS = `
+  p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
+  p.is_anonymous,
+  CASE WHEN p.is_anonymous THEN NULL ELSE p.user_id END AS user_id,
+  CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname
+`;
+
 // ---------- Auth routes ----------
 app.post('/api/auth/register', async (req, res) => {
   const { username, password, nickname } = req.body;
@@ -131,14 +141,27 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 app.get('/api/auth/me', auth, async (req, res) => {
-  const user = await db.prepare(`SELECT id, username, nickname, avatar, bio, role, created_at FROM users WHERE id = ?`).get(req.user.id);
+  const user = await db.prepare(
+    `SELECT id, username, nickname, avatar, bio, role, created_at,
+            real_name, class_name, address, email, wechat, qq, phone
+     FROM users WHERE id = ?`
+  ).get(req.user.id);
   res.json(user);
 });
 
 app.put('/api/auth/profile', auth, async (req, res) => {
-  const { nickname, bio, avatar } = req.body;
-  await db.prepare(`UPDATE users SET nickname = COALESCE(?, nickname), bio = COALESCE(?, bio), avatar = COALESCE(?, avatar) WHERE id = ?`)
-    .run(nickname || null, bio || null, avatar || null, req.user.id);
+  const fields = ['nickname', 'bio', 'avatar', 'real_name', 'class_name', 'address', 'email', 'wechat', 'qq', 'phone'];
+  const sets = [];
+  const params = [];
+  for (const f of fields) {
+    if (req.body[f] !== undefined) {
+      sets.push(`${f} = ?`);
+      params.push(req.body[f] === null ? '' : String(req.body[f]));
+    }
+  }
+  if (sets.length === 0) return res.json({ ok: true });
+  params.push(req.user.id);
+  await db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...params);
   res.json({ ok: true });
 });
 
@@ -146,7 +169,7 @@ app.put('/api/auth/profile', auth, async (req, res) => {
 app.get('/api/users/:id', async (req, res) => {
   const user = await db.prepare(`SELECT id, username, nickname, avatar, bio, created_at FROM users WHERE id = ?`).get(req.params.id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
-  const postCount = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE user_id = ? AND status = 'approved'`).get(req.params.id)).c;
+  const postCount = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE user_id = ? AND status = 'approved' AND is_anonymous = FALSE`).get(req.params.id)).c;
   res.json({ ...user, postCount });
 });
 
@@ -167,7 +190,8 @@ app.get('/api/posts', async (req, res) => {
   let where = "WHERE p.status = 'approved'";
   const params = [];
   if (category && category !== 'all') { where += ' AND p.category = ?'; params.push(category); }
-  if (userId) { where += ' AND p.user_id = ?'; params.push(userId); }
+  // 匿名帖不出现在任何用户主页，避免通过主页反推作者
+  if (userId) { where += ' AND p.user_id = ? AND p.is_anonymous = FALSE'; params.push(userId); }
   let orderBy = 'p.id DESC';
   if (sort === 'hot') orderBy = '(p.likes + p.views * 0.1) DESC';
 
@@ -177,7 +201,7 @@ app.get('/api/posts', async (req, res) => {
     where += ' AND (p.content ILIKE ? OR p.tags ILIKE ?)';
     params.push(`%${q}%`, `%${q}%`);
   }
-  sql = `SELECT p.* FROM posts p ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
+  sql = `SELECT ${PUBLIC_POST_FIELDS} FROM posts p ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
   params.push(Number(pageSize), offset);
 
   const totalSql = `SELECT COUNT(*) as c FROM posts p ${where}`;
@@ -190,14 +214,17 @@ app.get('/api/posts', async (req, res) => {
 
 app.get('/api/posts/hot', async (req, res) => {
   const posts = await db.prepare(
-    `SELECT id, category, content, nickname, likes, views FROM posts WHERE status = 'approved' ORDER BY (likes + views * 0.1) DESC LIMIT 10`
+    `SELECT p.id, p.category, p.content, p.likes, p.views, p.is_anonymous,
+            CASE WHEN p.is_anonymous THEN NULL ELSE p.user_id END AS user_id,
+            CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname
+     FROM posts p WHERE p.status = 'approved' ORDER BY (p.likes + p.views * 0.1) DESC LIMIT 10`
   ).all();
   posts.forEach(p => { p.images = []; });
   res.json(posts);
 });
 
 app.get('/api/posts/:id', async (req, res) => {
-  const post = await db.prepare(`SELECT * FROM posts WHERE id = ?`).get(req.params.id);
+  const post = await db.prepare(`SELECT ${PUBLIC_POST_FIELDS} FROM posts p WHERE p.id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
   post.images = post.images ? JSON.parse(post.images) : [];
   post.tags = post.tags ? JSON.parse(post.tags) : [];
@@ -216,13 +243,16 @@ app.get('/api/posts/:id', async (req, res) => {
 });
 
 app.post('/api/posts', auth, upload.array('images', 9), async (req, res) => {
-  const { category, content, nickname, tags } = req.body;
+  const { category, content, nickname, tags, anonymous } = req.body;
   if (!category || !content || !content.trim()) return res.status(400).json({ error: '分类和内容不能为空' });
   if (content.length > 3000) return res.status(400).json({ error: '内容不能超过3000字' });
   // 敏感词检测
   if (containsSensitive(content)) {
     return res.status(400).json({ error: '内容包含违规词汇，请修改后再发布' });
   }
+  const isAnonymous = anonymous === true || anonymous === 1 || String(anonymous).toLowerCase() === 'true' || String(anonymous) === '1';
+  const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || '';
+  const userAgent = req.headers['user-agent'] || '';
   // 图片处理：上传到云端存储，未配置则存本地
   let images = [];
   try {
@@ -235,8 +265,12 @@ app.post('/api/posts', auth, upload.array('images', 9), async (req, res) => {
   }
   const tagArr = tags ? (Array.isArray(tags) ? tags : JSON.parse(tags)) : [];
   const result = await db.prepare(
-    `INSERT INTO posts (user_id, category, content, tags, nickname, images) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
-  ).run(req.user.id, category, content.trim(), JSON.stringify(tagArr), (nickname || req.user.nickname).trim(), JSON.stringify(images));
+    `INSERT INTO posts (user_id, category, content, tags, nickname, images, is_anonymous, client_ip, user_agent)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+  ).run(
+    req.user.id, category, content.trim(), JSON.stringify(tagArr), (nickname || req.user.nickname).trim(),
+    JSON.stringify(images), isAnonymous, clientIp, userAgent
+  );
   res.json({ id: result.lastInsertRowid, message: '发布成功，等待管理员审核' });
 });
 
@@ -351,7 +385,8 @@ app.post('/api/posts/:id/favorite', auth, async (req, res) => {
 
 app.get('/api/favorites', auth, async (req, res) => {
   const posts = await db.prepare(
-    `SELECT p.* FROM posts p JOIN favorites f ON f.post_id = p.id WHERE f.user_id = ? AND p.status = 'approved' ORDER BY f.id DESC`
+    `SELECT ${PUBLIC_POST_FIELDS} FROM posts p JOIN favorites f ON f.post_id = p.id
+     WHERE f.user_id = ? AND p.status = 'approved' ORDER BY f.id DESC`
   ).all(req.user.id);
   posts.forEach(p => { p.images = p.images ? JSON.parse(p.images) : []; });
   res.json(posts);
@@ -412,6 +447,30 @@ app.get('/api/admin/posts', adminAuth, async (req, res) => {
   res.json({ total, posts });
 });
 
+app.get('/api/admin/posts/:id', adminAuth, async (req, res) => {
+  const post = await db.prepare(`SELECT * FROM posts WHERE id = ?`).get(req.params.id);
+  if (!post) return res.status(404).json({ error: '帖子不存在' });
+  post.images = post.images ? JSON.parse(post.images) : [];
+  post.tags = post.tags ? JSON.parse(post.tags) : [];
+
+  const author = post.user_id
+    ? await db.prepare(
+        `SELECT id, username, nickname, avatar, real_name, class_name, address, email, wechat, qq, phone, created_at
+         FROM users WHERE id = ?`
+      ).get(post.user_id)
+    : null;
+  const commentCount = (await db.prepare(`SELECT COUNT(*) as c FROM comments WHERE post_id = ?`).get(req.params.id)).c;
+
+  res.json({
+    post,
+    author,
+    stats: { comments: commentCount, likes: post.likes },
+    is_anonymous: !!post.is_anonymous,
+    client_ip: post.client_ip || '',
+    user_agent: post.user_agent || '',
+  });
+});
+
 app.put('/api/admin/posts/:id', adminAuth, async (req, res) => {
   const { status } = req.body;
   if (!['approved', 'rejected', 'pending'].includes(status)) return res.status(400).json({ error: '无效状态' });
@@ -420,14 +479,20 @@ app.put('/api/admin/posts/:id', adminAuth, async (req, res) => {
 });
 
 app.delete('/api/admin/posts/:id', adminAuth, async (req, res) => {
-  const post = await db.prepare(`SELECT images FROM posts WHERE id = ?`).get(req.params.id);
-  if (post?.images) {
+  const post = await db.prepare(`SELECT id, images FROM posts WHERE id = ?`).get(req.params.id);
+  if (!post) return res.status(404).json({ error: '帖子不存在' });
+  if (post.images) {
     for (const img of JSON.parse(post.images)) {
-      await fileStorage.deleteByUrl(img, uploadsDir);
+      try { await fileStorage.deleteByUrl(img, uploadsDir); } catch (e) { console.error('[admin] 图片清理失败:', e.message); }
     }
   }
-  await db.prepare(`DELETE FROM posts WHERE id = ?`).run(req.params.id);
-  res.json({ ok: true });
+  // 评论 / 点赞 / 收藏由外键级联删除；举报与通知没有外键，需显式清理
+  await db.transaction(async (tx) => {
+    await tx.prepare(`DELETE FROM reports WHERE post_id = ? OR comment_id IN (SELECT id FROM comments WHERE post_id = ?)`).run(req.params.id, req.params.id);
+    await tx.prepare(`DELETE FROM notifications WHERE post_id = ?`).run(req.params.id);
+    await tx.prepare(`DELETE FROM posts WHERE id = ?`).run(req.params.id);
+  });
+  res.json({ ok: true, message: '帖子及关联数据已删除' });
 });
 
 app.get('/api/admin/stats', adminAuth, async (req, res) => {

@@ -301,6 +301,21 @@ const DDL = `
   );
 `;
 
+// ---------- 幂等迁移（在 CREATE TABLE 之后追加，兼容已有库）----------
+const MIGRATIONS = `
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS real_name TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS class_name TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS address TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS wechat TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS qq TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT DEFAULT '';
+
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_anonymous BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS client_ip TEXT;
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS user_agent TEXT;
+`;
+
 // ---------- 种子数据（空库时写入，保留原有测试账号与示例帖子）----------
 async function seed() {
   const { rows } = await pool.query('SELECT COUNT(*) AS c FROM users');
@@ -339,6 +354,7 @@ async function seed() {
 
 async function init() {
   await pool.query(DDL);
+  await pool.query(MIGRATIONS);
   await seed();
   const host = (() => {
     try { return new URL(DATABASE_URL).host; } catch { return ''; }

@@ -53455,6 +53455,19 @@ var require_db3 = __commonJS({
     CONSTRAINT follows_unique UNIQUE (follower_id, following_id)
   );
 `;
+    var MIGRATIONS = `
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS real_name TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS class_name TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS address TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS wechat TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS qq TEXT DEFAULT '';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT DEFAULT '';
+
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_anonymous BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS client_ip TEXT;
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS user_agent TEXT;
+`;
     async function seed() {
       const { rows } = await pool.query("SELECT COUNT(*) AS c FROM users");
       if (rows[0].c > 0) return;
@@ -53488,6 +53501,7 @@ var require_db3 = __commonJS({
     }
     async function init() {
       await pool.query(DDL);
+      await pool.query(MIGRATIONS);
       await seed();
       const host = (() => {
         try {
@@ -53775,6 +53789,12 @@ var require_server = __commonJS({
         `INSERT INTO notifications (user_id, type, from_user, post_id, content) VALUES (?, ?, ?, ?, ?) RETURNING id`
       ).run(userId, type, fromUser, postId, content);
     }
+    var PUBLIC_POST_FIELDS = `
+  p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
+  p.is_anonymous,
+  CASE WHEN p.is_anonymous THEN NULL ELSE p.user_id END AS user_id,
+  CASE WHEN p.is_anonymous THEN '\u533F\u540D\u540C\u5B66' ELSE p.nickname END AS nickname
+`;
     app2.post("/api/auth/register", async (req, res) => {
       const { username, password, nickname } = req.body;
       if (!username || !password) return res.status(400).json({ error: "\u7528\u6237\u540D\u548C\u5BC6\u7801\u4E0D\u80FD\u4E3A\u7A7A" });
@@ -53800,18 +53820,32 @@ var require_server = __commonJS({
       res.json({ token, user: { id: user.id, username: user.username, nickname: user.nickname, avatar: user.avatar, role: user.role } });
     });
     app2.get("/api/auth/me", auth, async (req, res) => {
-      const user = await db.prepare(`SELECT id, username, nickname, avatar, bio, role, created_at FROM users WHERE id = ?`).get(req.user.id);
+      const user = await db.prepare(
+        `SELECT id, username, nickname, avatar, bio, role, created_at,
+            real_name, class_name, address, email, wechat, qq, phone
+     FROM users WHERE id = ?`
+      ).get(req.user.id);
       res.json(user);
     });
     app2.put("/api/auth/profile", auth, async (req, res) => {
-      const { nickname, bio, avatar } = req.body;
-      await db.prepare(`UPDATE users SET nickname = COALESCE(?, nickname), bio = COALESCE(?, bio), avatar = COALESCE(?, avatar) WHERE id = ?`).run(nickname || null, bio || null, avatar || null, req.user.id);
+      const fields = ["nickname", "bio", "avatar", "real_name", "class_name", "address", "email", "wechat", "qq", "phone"];
+      const sets = [];
+      const params = [];
+      for (const f of fields) {
+        if (req.body[f] !== void 0) {
+          sets.push(`${f} = ?`);
+          params.push(req.body[f] === null ? "" : String(req.body[f]));
+        }
+      }
+      if (sets.length === 0) return res.json({ ok: true });
+      params.push(req.user.id);
+      await db.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`).run(...params);
       res.json({ ok: true });
     });
     app2.get("/api/users/:id", async (req, res) => {
       const user = await db.prepare(`SELECT id, username, nickname, avatar, bio, created_at FROM users WHERE id = ?`).get(req.params.id);
       if (!user) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
-      const postCount = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE user_id = ? AND status = 'approved'`).get(req.params.id)).c;
+      const postCount = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE user_id = ? AND status = 'approved' AND is_anonymous = FALSE`).get(req.params.id)).c;
       res.json({ ...user, postCount });
     });
     app2.post("/api/users/:id/follow", auth, async (req, res) => {
@@ -53831,7 +53865,7 @@ var require_server = __commonJS({
         params.push(category);
       }
       if (userId) {
-        where += " AND p.user_id = ?";
+        where += " AND p.user_id = ? AND p.is_anonymous = FALSE";
         params.push(userId);
       }
       let orderBy = "p.id DESC";
@@ -53841,7 +53875,7 @@ var require_server = __commonJS({
         where += " AND (p.content ILIKE ? OR p.tags ILIKE ?)";
         params.push(`%${q}%`, `%${q}%`);
       }
-      sql = `SELECT p.* FROM posts p ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
+      sql = `SELECT ${PUBLIC_POST_FIELDS} FROM posts p ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
       params.push(Number(pageSize), offset);
       const totalSql = `SELECT COUNT(*) as c FROM posts p ${where}`;
       const total = (await db.prepare(totalSql).get(...params.slice(0, -2))).c;
@@ -53854,7 +53888,10 @@ var require_server = __commonJS({
     });
     app2.get("/api/posts/hot", async (req, res) => {
       const posts = await db.prepare(
-        `SELECT id, category, content, nickname, likes, views FROM posts WHERE status = 'approved' ORDER BY (likes + views * 0.1) DESC LIMIT 10`
+        `SELECT p.id, p.category, p.content, p.likes, p.views, p.is_anonymous,
+            CASE WHEN p.is_anonymous THEN NULL ELSE p.user_id END AS user_id,
+            CASE WHEN p.is_anonymous THEN '\u533F\u540D\u540C\u5B66' ELSE p.nickname END AS nickname
+     FROM posts p WHERE p.status = 'approved' ORDER BY (p.likes + p.views * 0.1) DESC LIMIT 10`
       ).all();
       posts.forEach((p) => {
         p.images = [];
@@ -53862,7 +53899,7 @@ var require_server = __commonJS({
       res.json(posts);
     });
     app2.get("/api/posts/:id", async (req, res) => {
-      const post = await db.prepare(`SELECT * FROM posts WHERE id = ?`).get(req.params.id);
+      const post = await db.prepare(`SELECT ${PUBLIC_POST_FIELDS} FROM posts p WHERE p.id = ?`).get(req.params.id);
       if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
       post.images = post.images ? JSON.parse(post.images) : [];
       post.tags = post.tags ? JSON.parse(post.tags) : [];
@@ -53877,12 +53914,15 @@ var require_server = __commonJS({
       res.json({ post, comments, liked, favorited });
     });
     app2.post("/api/posts", auth, upload.array("images", 9), async (req, res) => {
-      const { category, content, nickname, tags } = req.body;
+      const { category, content, nickname, tags, anonymous } = req.body;
       if (!category || !content || !content.trim()) return res.status(400).json({ error: "\u5206\u7C7B\u548C\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A" });
       if (content.length > 3e3) return res.status(400).json({ error: "\u5185\u5BB9\u4E0D\u80FD\u8D85\u8FC73000\u5B57" });
       if (containsSensitive(content)) {
         return res.status(400).json({ error: "\u5185\u5BB9\u5305\u542B\u8FDD\u89C4\u8BCD\u6C47\uFF0C\u8BF7\u4FEE\u6539\u540E\u518D\u53D1\u5E03" });
       }
+      const isAnonymous = anonymous === true || anonymous === 1 || String(anonymous).toLowerCase() === "true" || String(anonymous) === "1";
+      const clientIp = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip || "";
+      const userAgent = req.headers["user-agent"] || "";
       let images = [];
       try {
         for (const f of req.files || []) {
@@ -53894,8 +53934,19 @@ var require_server = __commonJS({
       }
       const tagArr = tags ? Array.isArray(tags) ? tags : JSON.parse(tags) : [];
       const result = await db.prepare(
-        `INSERT INTO posts (user_id, category, content, tags, nickname, images) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
-      ).run(req.user.id, category, content.trim(), JSON.stringify(tagArr), (nickname || req.user.nickname).trim(), JSON.stringify(images));
+        `INSERT INTO posts (user_id, category, content, tags, nickname, images, is_anonymous, client_ip, user_agent)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+      ).run(
+        req.user.id,
+        category,
+        content.trim(),
+        JSON.stringify(tagArr),
+        (nickname || req.user.nickname).trim(),
+        JSON.stringify(images),
+        isAnonymous,
+        clientIp,
+        userAgent
+      );
       res.json({ id: result.lastInsertRowid, message: "\u53D1\u5E03\u6210\u529F\uFF0C\u7B49\u5F85\u7BA1\u7406\u5458\u5BA1\u6838" });
     });
     app2.delete("/api/posts/:id", auth, async (req, res) => {
@@ -54000,7 +54051,8 @@ var require_server = __commonJS({
     });
     app2.get("/api/favorites", auth, async (req, res) => {
       const posts = await db.prepare(
-        `SELECT p.* FROM posts p JOIN favorites f ON f.post_id = p.id WHERE f.user_id = ? AND p.status = 'approved' ORDER BY f.id DESC`
+        `SELECT ${PUBLIC_POST_FIELDS} FROM posts p JOIN favorites f ON f.post_id = p.id
+     WHERE f.user_id = ? AND p.status = 'approved' ORDER BY f.id DESC`
       ).all(req.user.id);
       posts.forEach((p) => {
         p.images = p.images ? JSON.parse(p.images) : [];
@@ -54057,6 +54109,25 @@ var require_server = __commonJS({
       });
       res.json({ total, posts });
     });
+    app2.get("/api/admin/posts/:id", adminAuth, async (req, res) => {
+      const post = await db.prepare(`SELECT * FROM posts WHERE id = ?`).get(req.params.id);
+      if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
+      post.images = post.images ? JSON.parse(post.images) : [];
+      post.tags = post.tags ? JSON.parse(post.tags) : [];
+      const author = post.user_id ? await db.prepare(
+        `SELECT id, username, nickname, avatar, real_name, class_name, address, email, wechat, qq, phone, created_at
+         FROM users WHERE id = ?`
+      ).get(post.user_id) : null;
+      const commentCount = (await db.prepare(`SELECT COUNT(*) as c FROM comments WHERE post_id = ?`).get(req.params.id)).c;
+      res.json({
+        post,
+        author,
+        stats: { comments: commentCount, likes: post.likes },
+        is_anonymous: !!post.is_anonymous,
+        client_ip: post.client_ip || "",
+        user_agent: post.user_agent || ""
+      });
+    });
     app2.put("/api/admin/posts/:id", adminAuth, async (req, res) => {
       const { status } = req.body;
       if (!["approved", "rejected", "pending"].includes(status)) return res.status(400).json({ error: "\u65E0\u6548\u72B6\u6001" });
@@ -54064,14 +54135,23 @@ var require_server = __commonJS({
       res.json({ ok: true });
     });
     app2.delete("/api/admin/posts/:id", adminAuth, async (req, res) => {
-      const post = await db.prepare(`SELECT images FROM posts WHERE id = ?`).get(req.params.id);
-      if (post?.images) {
+      const post = await db.prepare(`SELECT id, images FROM posts WHERE id = ?`).get(req.params.id);
+      if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
+      if (post.images) {
         for (const img of JSON.parse(post.images)) {
-          await fileStorage.deleteByUrl(img, uploadsDir);
+          try {
+            await fileStorage.deleteByUrl(img, uploadsDir);
+          } catch (e) {
+            console.error("[admin] \u56FE\u7247\u6E05\u7406\u5931\u8D25:", e.message);
+          }
         }
       }
-      await db.prepare(`DELETE FROM posts WHERE id = ?`).run(req.params.id);
-      res.json({ ok: true });
+      await db.transaction(async (tx) => {
+        await tx.prepare(`DELETE FROM reports WHERE post_id = ? OR comment_id IN (SELECT id FROM comments WHERE post_id = ?)`).run(req.params.id, req.params.id);
+        await tx.prepare(`DELETE FROM notifications WHERE post_id = ?`).run(req.params.id);
+        await tx.prepare(`DELETE FROM posts WHERE id = ?`).run(req.params.id);
+      });
+      res.json({ ok: true, message: "\u5E16\u5B50\u53CA\u5173\u8054\u6570\u636E\u5DF2\u5220\u9664" });
     });
     app2.get("/api/admin/stats", adminAuth, async (req, res) => {
       const totalPosts = (await db.prepare(`SELECT COUNT(*) as c FROM posts`).get()).c;

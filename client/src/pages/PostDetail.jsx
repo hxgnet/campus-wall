@@ -105,6 +105,7 @@ export default function PostDetail() {
         <div className="detail-card">
           <div className="post-meta">
             <span className={`post-cat cat-${post.category}`}>{post.category}</span>
+            {post.is_anonymous && <span className="anon-badge">匿名</span>}
             <span className="post-time">{post.created_at}</span>
           </div>
           <div className="post-content" style={{ fontSize: 16 }}>{post.content}</div>
@@ -121,7 +122,7 @@ export default function PostDetail() {
             <button className={`post-action ${favorited ? 'liked' : ''}`} onClick={handleFavorite}><span>{favorited ? '⭐' : '☆'}</span><span>{favorited ? '已收藏' : '收藏'}</span></button>
             <span className="post-action"><span>👁️</span><span>{post.views}</span></span>
             <button className="post-action" onClick={() => setShowReport(true)}><span>🚩</span><span>举报</span></button>
-            <span className="post-nick" style={{ marginLeft: 'auto' }}>@{post.nickname}</span>
+            <span className="post-nick" style={{ marginLeft: 'auto' }}>{post.is_anonymous ? '🎭 匿名同学' : `@${post.nickname}`}</span>
           </div>
         </div>
 

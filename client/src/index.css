@@ -657,6 +657,98 @@ body.dark input::placeholder, body.dark textarea::placeholder { color: #64748b; 
 }
 .profile-header .avatar { width: 72px; height: 72px; font-size: 28px; margin: 0 auto 12px; }
 
+/* 匿名标识 / 匿名发布 */
+.anon-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: var(--primary-light);
+  color: var(--primary-dark);
+  font-weight: 600;
+}
+.anon-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+}
+.anon-toggle input { width: 16px; height: 16px; accent-color: var(--primary); }
+.anon-hint {
+  font-size: 12px;
+  color: var(--text-light);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+/* 个人资料编辑 */
+.profile-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 10px 0 8px;
+  text-align: left;
+}
+.profile-field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-light);
+  margin-bottom: 4px;
+}
+
+/* 管理员帖子详情 */
+.admin-detail-box {
+  max-width: 640px;
+  max-height: 88vh;
+  overflow-y: auto;
+}
+.admin-detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.admin-detail-head h3 { margin-bottom: 0; }
+.admin-detail-section {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+.admin-detail-section h4 { font-size: 14px; margin-bottom: 8px; }
+.admin-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+}
+.admin-detail-item {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  min-width: 0;
+}
+.admin-detail-label { color: var(--text-light); flex-shrink: 0; }
+.admin-detail-wide { grid-column: 1 / -1; }
+.admin-detail-ua { word-break: break-all; }
+.admin-detail-content {
+  margin-top: 8px;
+  background: var(--bg);
+  padding: 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.admin-detail-actions { display: flex; gap: 8px; margin-top: 14px; }
+
+@media (max-width: 480px) {
+  .profile-fields,
+  .admin-detail-grid { grid-template-columns: 1fr; }
+}
+
 /* Toast */
 .toast {
   position: fixed;

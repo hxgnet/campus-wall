@@ -12,6 +12,8 @@ export default function Admin() {
   const [stats, setStats] = useState(null);
   const [reports, setReports] = useState([]);
   const [users, setUsers] = useState([]);
+  const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   const load = async () => {
     if (tab === 'posts') {
@@ -51,10 +53,23 @@ export default function Admin() {
     catch (e) { alert(e.message); }
   };
 
-  const del = async (id) => {
-    if (!confirm('确定删除该帖子？')) return;
-    try { await api.deletePost(id); setPosts((prev) => prev.filter((p) => p.id !== id)); }
-    catch (e) { alert(e.message); }
+  const openDetail = async (id) => {
+    setDetailLoading(true);
+    try {
+      const data = await api.getPostAdmin(id);
+      setDetail(data);
+    } catch (e) { alert(e.message); }
+    finally { setDetailLoading(false); }
+  };
+
+  const forceDelete = async (id) => {
+    if (!confirm('确定强制删除该帖子？此操作不可恢复，将同时清理图片、评论、点赞、收藏、举报与相关通知。')) return;
+    try {
+      await api.deletePost(id);
+      setDetail(null);
+      await load();
+      api.getAdminStats().then(setStats).catch(() => {});
+    } catch (e) { alert(e.message); }
   };
 
   const delUser = async (id) => {
@@ -135,6 +150,7 @@ export default function Admin() {
                 <div className="admin-post" key={p.id}>
                   <div className="admin-post-head">
                     <span className={`post-cat cat-${p.category}`}>{p.category}</span>
+                    {p.is_anonymous && <span className="anon-badge">匿名</span>}
                     <span className={`status-badge status-${p.status}`}>{p.status === 'pending' ? '待审核' : p.status === 'approved' ? '已通过' : '已拒绝'}</span>
                     <span className="post-time">{p.created_at}</span>
                   </div>
@@ -147,10 +163,11 @@ export default function Admin() {
                     </div>
                   )}
                   <div className="admin-actions">
+                    <button className="btn-secondary" onClick={() => openDetail(p.id)} disabled={detailLoading}>详情</button>
                     <button className="btn-success" onClick={() => updateStatus(p.id, 'approved')}>通过</button>
                     <button className="btn-warning" onClick={() => updateStatus(p.id, 'rejected')}>拒绝</button>
                     <button className="btn-secondary" onClick={() => updateStatus(p.id, 'pending')}>重审</button>
-                    <button className="btn-danger" onClick={() => del(p.id)}>删除</button>
+                    <button className="btn-danger" onClick={() => forceDelete(p.id)}>强制删除</button>
                   </div>
                 </div>
               ))
@@ -207,6 +224,62 @@ export default function Admin() {
         )}
       </div>
       {modalImg && <div className="image-modal" onClick={() => setModalImg(null)}><img src={modalImg} alt="" /></div>}
+
+      {detail && (
+        <div className="modal-overlay" onClick={() => setDetail(null)}>
+          <div className="modal-box admin-detail-box" onClick={(e) => e.stopPropagation()}>
+            <div className="admin-detail-head">
+              <h3>帖子详情 #{detail.post.id}</h3>
+              <button className="btn btn-secondary" onClick={() => setDetail(null)}>关闭</button>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>帖子信息</h4>
+              <div className="admin-detail-grid">
+                <div className="admin-detail-item"><span className="admin-detail-label">分类</span><span>{detail.post.category}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">状态</span><span>{detail.post.status}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">匿名发布</span><span>{detail.is_anonymous ? '是' : '否'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">评论 / 点赞</span><span>{detail.stats.comments} / {detail.stats.likes}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">发布时间</span><span>{detail.post.created_at}</span></div>
+              </div>
+              <div className="admin-detail-content">{detail.post.content}</div>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>发布者信息</h4>
+              {detail.author ? (
+                <div className="admin-detail-grid">
+                  <div className="admin-detail-item"><span className="admin-detail-label">用户名</span><span>@{detail.author.username}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">昵称</span><span>{detail.author.nickname || '—'}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">真实姓名</span><span>{detail.author.real_name || '—'}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">班级</span><span>{detail.author.class_name || '—'}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">住址</span><span>{detail.author.address || '—'}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">邮箱</span><span>{detail.author.email || '—'}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">微信</span><span>{detail.author.wechat || '—'}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">QQ</span><span>{detail.author.qq || '—'}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">手机号</span><span>{detail.author.phone || '—'}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">注册时间</span><span>{detail.author.created_at}</span></div>
+                </div>
+              ) : (
+                <p style={{ color: 'var(--text-light)', fontSize: 13 }}>发布者账号已注销或不存在</p>
+              )}
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>网络信息</h4>
+              <div className="admin-detail-grid">
+                <div className="admin-detail-item"><span className="admin-detail-label">IP</span><span>{detail.client_ip || '—'}</span></div>
+                <div className="admin-detail-item admin-detail-wide"><span className="admin-detail-label">UA</span><span className="admin-detail-ua">{detail.user_agent || '—'}</span></div>
+              </div>
+            </div>
+
+            <div className="admin-detail-actions">
+              <button className="btn btn-danger" onClick={() => forceDelete(detail.post.id)}>强制删除</button>
+              <button className="btn btn-secondary" onClick={() => setDetail(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
