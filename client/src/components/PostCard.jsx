@@ -1,21 +1,24 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
+import { useAuth } from '../AuthContext.jsx';
 
 export default function PostCard({ post, onLikeChange }) {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [likes, setLikes] = useState(post.likes);
   const [liked, setLiked] = useState(false);
   const isSuper = localStorage.getItem('admin_token') && sessionStorage.getItem('admin_role') === 'super';
 
   const handleLike = async (e) => {
     e.stopPropagation();
+    if (!user) { alert('请先登录'); navigate('/login'); return; }
     try {
       const r = await api.likePost(post.id);
       setLiked(r.liked);
       setLikes(r.likes);
       if (onLikeChange) onLikeChange(post.id, r.likes);
-    } catch (err) { console.error(err); }
+    } catch (err) { alert(err.message); }
   };
 
   const superDelete = async (e) => {

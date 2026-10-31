@@ -37,11 +37,12 @@ export default function PostDetail() {
   useEffect(() => { load(); }, [id]);
 
   const handleLike = async () => {
+    if (!user) { alert('请先登录'); navigate('/login'); return; }
     try {
       const r = await api.likePost(id);
       setLiked(r.liked);
       setPost((p) => ({ ...p, likes: r.likes }));
-    } catch (e) { console.error(e); }
+    } catch (e) { alert(e.message); }
   };
 
   const handleFavorite = async () => {
@@ -54,6 +55,7 @@ export default function PostDetail() {
 
   const submitComment = async (e) => {
     e.preventDefault();
+    if (!user) { alert('请先登录'); navigate('/login'); return; }
     if (!comment.trim()) return;
     setSubmitLoading(true);
     try {
@@ -65,6 +67,7 @@ export default function PostDetail() {
   };
 
   const submitReply = async (parentId) => {
+    if (!user) { alert('请先登录'); navigate('/login'); return; }
     if (!replyText.trim()) return;
     try {
       await api.addComment(id, replyText, parentId);
@@ -75,13 +78,15 @@ export default function PostDetail() {
   };
 
   const likeComment = async (cid) => {
+    if (!user) { alert('请先登录'); navigate('/login'); return; }
     try {
       const r = await api.likeComment(cid);
       setComments((prev) => prev.map((c) => c.id === cid ? { ...c, likes: r.likes } : c));
-    } catch (e) { console.error(e); }
+    } catch (e) { alert(e.message); }
   };
 
   const submitReport = async () => {
+    if (!user) { alert('请先登录'); navigate('/login'); return; }
     if (!reportReason.trim()) { alert('请填写原因'); return; }
     try {
       await api.report(id, null, reportReason);
@@ -180,10 +185,10 @@ export default function PostDetail() {
             </div>
           ))}
           <p className="anon-hint" style={{ marginTop: 12 }}>
-            {user ? `以「${user.nickname}」的身份评论` : '将以匿名身份评论'}
+            {user ? `以「${user.nickname}」的身份评论` : '🔒 登录后即可评论、点赞、收藏'}
           </p>
           <form className="comment-form" onSubmit={submitComment}>
-            <input type="text" placeholder="写下你的评论..." value={comment} onChange={(e) => setComment(e.target.value)} />
+            <input type="text" placeholder={user ? '写下你的评论...' : '请先登录后再评论'} value={comment} onChange={(e) => setComment(e.target.value)} />
             <button type="button" className="btn btn-secondary" style={{ padding: '0 12px' }} onClick={() => setShowEmoji(!showEmoji)}>😊</button>
             <button className="btn btn-primary" type="submit" disabled={submitLoading || !comment.trim()}>{submitLoading ? '...' : '发送'}</button>
           </form>

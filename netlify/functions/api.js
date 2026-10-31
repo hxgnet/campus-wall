@@ -53509,6 +53509,22 @@ var require_db3 = __commonJS({
   ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_reason TEXT;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_at TEXT;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_info TEXT;
+
+  -- \u4E2A\u4EBA\u4FE1\u606F\u5355\u9879\u516C\u5F00\u5F00\u5173
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS show_real_name BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS show_class_name BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS show_address BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS show_email BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS show_wechat BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS show_qq BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS show_phone BOOLEAN NOT NULL DEFAULT FALSE;
+
+  -- \u6CE8\u518C\u65F6\u83B7\u53D6\u7684\u7ECF\u7EAC\u5EA6\uFF08\u4EC5\u670D\u52A1\u7AEF\u5B58\u50A8\uFF0C\u4E0D\u5BF9\u4EFB\u4F55\u7528\u6237\u8FD4\u56DE\uFF09
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+
+  -- \u7528\u6237\u534F\u8BAE\u540C\u610F\u65F6\u95F4
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS agreed_at TEXT;
 `;
     function genUid() {
       const ts = Date.now().toString(16).padStart(12, "0");
@@ -53968,17 +53984,21 @@ var require_server = __commonJS({
       return null;
     }
     app2.post("/api/auth/register", async (req, res) => {
-      const { username, password, nickname } = req.body;
+      const { username, password, nickname, agreement, latitude, longitude } = req.body;
       if (!username || !password) return res.status(400).json({ error: "\u7528\u6237\u540D\u548C\u5BC6\u7801\u4E0D\u80FD\u4E3A\u7A7A" });
       if (username.length < 3 || username.length > 20) return res.status(400).json({ error: "\u7528\u6237\u540D\u97003-20\u4F4D" });
       if (password.length < 6) return res.status(400).json({ error: "\u5BC6\u7801\u81F3\u5C116\u4F4D" });
+      if (!agreement) return res.status(400).json({ error: "\u8BF7\u5148\u9605\u8BFB\u5E76\u540C\u610F\u300A\u7528\u6237\u534F\u8BAE\u300B" });
       const exists = await db.prepare(`SELECT id FROM users WHERE username = ?`).get(username);
       if (exists) return res.status(400).json({ error: "\u7528\u6237\u540D\u5DF2\u88AB\u6CE8\u518C" });
       const hash = await bcrypt.hash(password, 10);
       const uid = genUid();
+      const lat = latitude == null ? null : Number(latitude);
+      const lng = longitude == null ? null : Number(longitude);
       const result = await db.prepare(
-        `INSERT INTO users (username, password_hash, nickname, uid) VALUES (?, ?, ?, ?) RETURNING id`
-      ).run(username, hash, nickname || username, uid);
+        `INSERT INTO users (username, password_hash, nickname, uid, latitude, longitude, agreed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ${NOW_TEXT}) RETURNING id`
+      ).run(username, hash, nickname || username, uid, lat, lng);
       const token = jwt.sign({ id: uid, username, nickname: nickname || username, role: "user" }, JWT_SECRET, { expiresIn: "30d" });
       res.json({ token, user: { uid, username, nickname: nickname || username, role: "user" } });
     });
@@ -53998,19 +54018,27 @@ var require_server = __commonJS({
     app2.get("/api/auth/me", auth, async (req, res) => {
       const user = await db.prepare(
         `SELECT uid, username, nickname, avatar, bio, role, created_at, profile_public,
-            real_name, class_name, address, email, wechat, qq, phone
+            real_name, class_name, address, email, wechat, qq, phone,
+            show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone
      FROM users WHERE id = ?`
       ).get(req.user.dbId);
       res.json(user);
     });
     app2.put("/api/auth/profile", auth, async (req, res) => {
       const fields = ["nickname", "bio", "avatar", "real_name", "class_name", "address", "email", "wechat", "qq", "phone"];
+      const showFields = ["show_real_name", "show_class_name", "show_address", "show_email", "show_wechat", "show_qq", "show_phone"];
       const sets = [];
       const params = [];
       for (const f of fields) {
         if (req.body[f] !== void 0) {
           sets.push(`${f} = ?`);
           params.push(req.body[f] === null ? "" : String(req.body[f]));
+        }
+      }
+      for (const f of showFields) {
+        if (req.body[f] !== void 0) {
+          sets.push(`${f} = ?`);
+          params.push(req.body[f] === true || req.body[f] === "true" || req.body[f] === 1);
         }
       }
       if (req.body.profile_public !== void 0) {
@@ -54030,9 +54058,23 @@ var require_server = __commonJS({
       }
       res.json({ ok: true });
     });
+    app2.delete("/api/auth/account", auth, async (req, res) => {
+      const uid = req.user.uid;
+      const dbId = req.user.dbId;
+      await db.prepare(`DELETE FROM notifications WHERE user_id = ?`).run(dbId);
+      await db.prepare(`DELETE FROM follows WHERE follower_id = ? OR following_id = ?`).run(dbId, dbId);
+      await db.prepare(`DELETE FROM friends WHERE requester_uid = ? OR addressee_uid = ?`).run(uid, uid);
+      await db.prepare(`DELETE FROM messages WHERE from_uid = ? OR to_uid = ?`).run(uid, uid);
+      await db.prepare(`DELETE FROM reports WHERE user_id = ?`).run(dbId);
+      await db.prepare(`DELETE FROM users WHERE id = ?`).run(dbId);
+      res.json({ ok: true });
+    });
     app2.get("/api/users/:id", async (req, res) => {
       const user = await db.prepare(
-        `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation FROM users WHERE uid = ?`
+        `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation,
+            real_name, class_name, address, email, wechat, qq, phone,
+            show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone
+     FROM users WHERE uid = ?`
       ).get(req.params.id);
       if (!user) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
       const postCount = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE user_id = ? AND status = 'approved' AND is_anonymous = FALSE`).get(user.id)).c;
@@ -54051,11 +54093,9 @@ var require_server = __commonJS({
       if (isSuperToken || viewer && (viewer.uid === user.uid || viewer.role === "super")) {
         out.reputation = user.reputation;
       }
-      if (user.profile_public) {
-        const contact = await db.prepare(
-          `SELECT real_name, class_name, address, email, wechat, qq, phone FROM users WHERE id = ?`
-        ).get(user.id);
-        Object.assign(out, contact);
+      const contactFields = ["real_name", "class_name", "address", "email", "wechat", "qq", "phone"];
+      for (const f of contactFields) {
+        if (user[`show_${f}`]) out[f] = user[f];
       }
       res.json(out);
     });
@@ -54188,75 +54228,57 @@ var require_server = __commonJS({
       await db.prepare(`DELETE FROM posts WHERE id = ?`).run(req.params.id);
       res.json({ ok: true });
     });
-    app2.post("/api/posts/:id/like", async (req, res) => {
-      const user = await getCurrentUser(req);
-      const ip = req.headers["x-forwarded-for"] || req.ip || "unknown";
+    app2.post("/api/posts/:id/like", auth, async (req, res) => {
       const post = await db.prepare(`SELECT id, user_id, nickname FROM posts WHERE id = ?`).get(req.params.id);
       if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
       let liked = false;
       let likes = 0;
       let shouldNotify = false;
       await db.transaction(async (tx) => {
-        if (user) {
-          const existing = await tx.prepare(`SELECT id FROM likes WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.dbId);
-          if (existing) {
-            await tx.prepare(`DELETE FROM likes WHERE post_id = ? AND user_id = ?`).run(req.params.id, user.dbId);
-            await tx.prepare(`UPDATE posts SET likes = likes - 1 WHERE id = ?`).run(req.params.id);
-          } else {
-            await tx.prepare(`INSERT INTO likes (post_id, user_id, ip) VALUES (?, ?, ?) RETURNING id`).run(req.params.id, user.dbId, ip);
-            await tx.prepare(`UPDATE posts SET likes = likes + 1 WHERE id = ?`).run(req.params.id);
-            liked = true;
-            shouldNotify = true;
-          }
+        const existing = await tx.prepare(`SELECT id FROM likes WHERE post_id = ? AND user_id = ?`).get(req.params.id, req.user.dbId);
+        if (existing) {
+          await tx.prepare(`DELETE FROM likes WHERE post_id = ? AND user_id = ?`).run(req.params.id, req.user.dbId);
+          await tx.prepare(`UPDATE posts SET likes = likes - 1 WHERE id = ?`).run(req.params.id);
         } else {
-          const existing = await tx.prepare(`SELECT id FROM likes WHERE post_id = ? AND ip = ? AND user_id IS NULL`).get(req.params.id, ip);
-          if (existing) {
-            await tx.prepare(`DELETE FROM likes WHERE post_id = ? AND ip = ? AND user_id IS NULL`).run(req.params.id, ip);
-            await tx.prepare(`UPDATE posts SET likes = likes - 1 WHERE id = ?`).run(req.params.id);
-          } else {
-            await tx.prepare(`INSERT INTO likes (post_id, ip) VALUES (?, ?) RETURNING id`).run(req.params.id, ip);
-            await tx.prepare(`UPDATE posts SET likes = likes + 1 WHERE id = ?`).run(req.params.id);
-            liked = true;
-          }
+          await tx.prepare(`INSERT INTO likes (post_id, user_id) VALUES (?, ?) RETURNING id`).run(req.params.id, req.user.dbId);
+          await tx.prepare(`UPDATE posts SET likes = likes + 1 WHERE id = ?`).run(req.params.id);
+          liked = true;
+          shouldNotify = true;
         }
         likes = (await tx.prepare(`SELECT likes FROM posts WHERE id = ?`).get(req.params.id)).likes;
       });
-      if (shouldNotify) await notify(post.user_id, "like", user.uid, post.id, "\u8D5E\u4E86\u4F60\u7684\u5E16\u5B50");
+      if (shouldNotify) await notify(post.user_id, "like", req.user.uid, post.id, "\u8D5E\u4E86\u4F60\u7684\u5E16\u5B50");
       res.json({ liked, likes });
     });
-    app2.post("/api/posts/:id/comments", async (req, res) => {
+    app2.post("/api/posts/:id/comments", auth, async (req, res) => {
       const { content, parentId } = req.body;
       if (!content || !content.trim()) return res.status(400).json({ error: "\u8BC4\u8BBA\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A" });
       if (content.length > 500) return res.status(400).json({ error: "\u8BC4\u8BBA\u4E0D\u80FD\u8D85\u8FC7500\u5B57" });
       if (containsSensitive(content)) return res.status(400).json({ error: "\u8BC4\u8BBA\u5305\u542B\u8FDD\u89C4\u8BCD\u6C47\uFF0C\u8BF7\u4FEE\u6539\u540E\u518D\u53D1\u5E03" });
       const post = await db.prepare(`SELECT id, user_id, nickname FROM posts WHERE id = ?`).get(req.params.id);
       if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
-      const user = await getCurrentUser(req);
-      const nick = user ? user.nickname : "\u533F\u540D\u540C\u5B66";
+      const nick = req.user.nickname;
       const result = await db.prepare(
         `INSERT INTO comments (post_id, user_id, parent_id, content, nickname) VALUES (?, ?, ?, ?, ?) RETURNING id`
-      ).run(req.params.id, user?.dbId || null, parentId || null, content.trim(), nick);
-      const fromUid = user?.uid || null;
+      ).run(req.params.id, req.user.dbId, parentId || null, content.trim(), nick);
       if (parentId) {
         const parent = await db.prepare(`SELECT user_id, nickname FROM comments WHERE id = ?`).get(parentId);
-        if (parent) await notify(parent.user_id, "comment_reply", fromUid, post.id, `\u56DE\u590D\u4E86\u4F60\u7684\u8BC4\u8BBA: ${content.slice(0, 30)}`);
+        if (parent) await notify(parent.user_id, "comment_reply", req.user.uid, post.id, `\u56DE\u590D\u4E86\u4F60\u7684\u8BC4\u8BBA: ${content.slice(0, 30)}`);
       } else {
-        await notify(post.user_id, "comment", fromUid, post.id, `\u8BC4\u8BBA\u4E86\u4F60\u7684\u5E16\u5B50: ${content.slice(0, 30)}`);
+        await notify(post.user_id, "comment", req.user.uid, post.id, `\u8BC4\u8BBA\u4E86\u4F60\u7684\u5E16\u5B50: ${content.slice(0, 30)}`);
       }
       res.json({ id: result.lastInsertRowid });
     });
-    app2.post("/api/comments/:id/like", async (req, res) => {
-      const user = await getCurrentUser(req);
-      const ip = req.headers["x-forwarded-for"] || req.ip || "unknown";
+    app2.post("/api/comments/:id/like", auth, async (req, res) => {
       let likes = 0;
       await db.transaction(async (tx) => {
         const inserted = await tx.prepare(
-          `INSERT INTO comment_likes (comment_id, user_id, ip) VALUES (?, ?, ?) ON CONFLICT DO NOTHING RETURNING id`
-        ).run(req.params.id, user?.dbId || null, ip);
+          `INSERT INTO comment_likes (comment_id, user_id, ip) VALUES (?, ?, '') ON CONFLICT DO NOTHING RETURNING id`
+        ).run(req.params.id, req.user.dbId);
         if (inserted.changes > 0) {
           await tx.prepare(`UPDATE comments SET likes = likes + 1 WHERE id = ?`).run(req.params.id);
         } else {
-          await tx.prepare(`DELETE FROM comment_likes WHERE comment_id = ? AND (user_id = ? OR ip = ?)`).run(req.params.id, user?.dbId || null, ip);
+          await tx.prepare(`DELETE FROM comment_likes WHERE comment_id = ? AND user_id = ? AND ip = ''`).run(req.params.id, req.user.dbId);
           await tx.prepare(`UPDATE comments SET likes = likes - 1 WHERE id = ?`).run(req.params.id);
         }
         likes = (await tx.prepare(`SELECT likes FROM comments WHERE id = ?`).get(req.params.id)).likes;
@@ -54288,11 +54310,10 @@ var require_server = __commonJS({
       });
       res.json(posts);
     });
-    app2.post("/api/reports", async (req, res) => {
+    app2.post("/api/reports", auth, async (req, res) => {
       const { postId, commentId, reason } = req.body;
       if (!reason) return res.status(400).json({ error: "\u8BF7\u586B\u5199\u4E3E\u62A5\u539F\u56E0" });
-      const user = await getCurrentUser(req);
-      await db.prepare(`INSERT INTO reports (post_id, comment_id, user_id, reason) VALUES (?, ?, ?, ?) RETURNING id`).run(postId || null, commentId || null, user?.dbId || null, reason);
+      await db.prepare(`INSERT INTO reports (post_id, comment_id, user_id, reason) VALUES (?, ?, ?, ?) RETURNING id`).run(postId || null, commentId || null, req.user.dbId, reason);
       res.json({ ok: true, message: "\u4E3E\u62A5\u5DF2\u63D0\u4EA4\uFF0C\u7BA1\u7406\u5458\u4F1A\u5C3D\u5FEB\u5904\u7406" });
     });
     app2.get("/api/notifications", auth, async (req, res) => {

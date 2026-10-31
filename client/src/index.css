@@ -686,6 +686,16 @@ body.dark input::placeholder, body.dark textarea::placeholder { color: #64748b; 
   margin-top: 6px;
   line-height: 1.5;
 }
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--primary);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: inherit;
+  text-decoration: underline;
+}
+.link-btn:hover { color: var(--primary-dark); }
 
 /* 个人资料编辑 */
 .profile-fields {

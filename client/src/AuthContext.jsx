@@ -23,8 +23,8 @@ export function AuthProvider({ children }) {
     return res.user;
   };
 
-  const register = async (username, password, nickname) => {
-    const res = await api.register(username, password, nickname);
+  const register = async (username, password, nickname, geo) => {
+    const res = await api.register(username, password, nickname, geo);
     localStorage.setItem('token', res.token);
     setUser(res.user);
     return res.user;
@@ -35,10 +35,16 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
+  const deleteAccount = async () => {
+    await api.deleteAccount();
+    localStorage.removeItem('token');
+    setUser(null);
+  };
+
   const updateUser = (u) => setUser(u);
 
   return (
-    <AuthContext.Provider value={{ user, login, register, logout, updateUser, loading }}>
+    <AuthContext.Provider value={{ user, login, register, logout, deleteAccount, updateUser, loading }}>
       {children}
     </AuthContext.Provider>
   );

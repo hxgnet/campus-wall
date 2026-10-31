@@ -16,11 +16,20 @@ async function request(url, options = {}) {
 
 export const api = {
   // Auth
-  register: (username, password, nickname) =>
-    request('/auth/register', { method: 'POST', body: JSON.stringify({ username, password, nickname }) }),
+  register: (username, password, nickname, geo) =>
+    request('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        username, password, nickname,
+        agreement: true,
+        latitude: geo ? geo.latitude : null,
+        longitude: geo ? geo.longitude : null,
+      }),
+    }),
   login: (username, password) =>
     request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   me: () => request('/auth/me'),
+  deleteAccount: () => request('/auth/account', { method: 'DELETE' }),
   updateProfile: (data) =>
     request('/auth/profile', { method: 'PUT', body: JSON.stringify(data) }),
   getUser: (id) => request(`/users/${id}`),
