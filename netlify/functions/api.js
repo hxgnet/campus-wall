@@ -53764,6 +53764,14 @@ var require_server = __commonJS({
         `INSERT INTO notifications (user_id, type, from_user, post_id, content) VALUES (?, ?, ?, ?, ?) RETURNING id`
       ).run(userId, type, fromUser, postId, content);
     }
+    app2.post("/api/debug/echo", (req, res) => {
+      res.json({
+        contentType: req.headers["content-type"] || null,
+        contentLength: req.headers["content-length"] || null,
+        bodyType: typeof req.body,
+        bodyKeys: req.body && typeof req.body === "object" ? Object.keys(req.body) : null
+      });
+    });
     app2.post("/api/auth/register", async (req, res) => {
       const { username, password, nickname } = req.body;
       if (!username || !password) return res.status(400).json({ error: "\u7528\u6237\u540D\u548C\u5BC6\u7801\u4E0D\u80FD\u4E3A\u7A7A" });

@@ -92,6 +92,15 @@ async function notify(userId, type, fromUser, postId, content) {
 }
 
 // ---------- Auth routes ----------
+app.post('/api/debug/echo', (req, res) => {
+  res.json({
+    contentType: req.headers['content-type'] || null,
+    contentLength: req.headers['content-length'] || null,
+    bodyType: typeof req.body,
+    bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : null,
+  });
+});
+
 app.post('/api/auth/register', async (req, res) => {
   const { username, password, nickname } = req.body;
   if (!username || !password) return res.status(400).json({ error: '用户名和密码不能为空' });
