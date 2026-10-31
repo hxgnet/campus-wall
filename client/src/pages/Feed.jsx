@@ -11,8 +11,6 @@ export default function Feed() {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
-  const [search, setSearch] = useState('');
-  const [searchInput, setSearchInput] = useState('');
   const [sort, setSort] = useState('new');
 
   const loadPosts = async (reset = false) => {
@@ -20,7 +18,7 @@ export default function Feed() {
     setLoading(true);
     try {
       const curPage = reset ? 1 : page;
-      const data = await api.getPosts({ category, page: curPage, pageSize: 20, sort, q: search });
+      const data = await api.getPosts({ category, page: curPage, pageSize: 20, sort });
       setPosts((prev) => (reset ? data.posts : [...prev, ...data.posts]));
       setHasMore(data.total > (reset ? 0 : posts.length) + data.posts.length);
       setPage((p) => (reset ? 2 : p + 1));
@@ -28,29 +26,21 @@ export default function Feed() {
     finally { setLoading(false); }
   };
 
-  useEffect(() => { loadPosts(true); /* eslint-disable-next-line */ }, [category, search, sort]);
+  useEffect(() => { loadPosts(true); /* eslint-disable-next-line */ }, [category, sort]);
 
   useEffect(() => {
     api.getHotPosts().then(setHotPosts).catch(() => {});
   }, []);
 
   const onLikeChange = (id, likes) => setPosts((prev) => prev.map((p) => p.id === id ? { ...p, likes } : p));
-  const doSearch = (e) => { e.preventDefault(); setSearch(searchInput); };
 
   return (
     <div className="page">
       <div className="container">
-        <form className="search-bar" onSubmit={doSearch}>
-          <input placeholder="搜索帖子内容或标签..." value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
-          <button type="submit" className="btn btn-primary">🔍</button>
-        </form>
-
-        {search && (
-          <div style={{ marginBottom: 8 }}>
-            <span style={{ fontSize: 13, color: 'var(--text-light)' }}>搜索 "{search}" 的结果</span>
-            <button className="reply-link" style={{ marginLeft: 8 }} onClick={() => { setSearch(''); setSearchInput(''); }}>清除</button>
-          </div>
-        )}
+        <div className="search-bar search-trigger" onClick={() => navigate('/search')}>
+          <input placeholder="搜索帖子内容或标签..." readOnly />
+          <button type="button" className="btn btn-primary">🔍</button>
+        </div>
 
         <div style={{ display: 'flex', gap: 12 }}>
           <div style={{ flex: 1, minWidth: 0 }}>

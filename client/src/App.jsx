@@ -3,6 +3,7 @@ import { AuthProvider } from './AuthContext.jsx';
 import { ThemeProvider } from './ThemeContext.jsx';
 import Header from './components/Header.jsx';
 import Feed from './pages/Feed.jsx';
+import Search from './pages/Search.jsx';
 import PostDetail from './pages/PostDetail.jsx';
 import CreatePost from './pages/CreatePost.jsx';
 import Admin from './pages/Admin.jsx';
@@ -18,6 +19,7 @@ export default function App() {
         <Header />
         <Routes>
           <Route path="/" element={<Feed />} />
+          <Route path="/search" element={<Search />} />
           <Route path="/post/:id" element={<PostDetail />} />
           <Route path="/create" element={<CreatePost />} />
           <Route path="/login" element={<Login />} />
