@@ -274,7 +274,7 @@ app.get('/api/auth/me', auth, async (req, res) => {
     `SELECT uid, username, nickname, avatar, bio, role, created_at, profile_public,
             real_name, class_name, address, email, wechat, qq, phone,
             show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
-            grade, tag
+            grade, tag, grade_set_by_admin
      FROM users WHERE id = ?`
   ).get(req.user.dbId);
   // 经纬度(latitude/longitude)永远不返回给任何用户，包括本人
@@ -301,6 +301,14 @@ app.put('/api/auth/profile', auth, async (req, res) => {
   if (req.body.profile_public !== undefined) {
     sets.push('profile_public = ?');
     params.push(req.body.profile_public === true || req.body.profile_public === 'true' || req.body.profile_public === 1);
+  }
+  // 用户可自行设置入学年份（grade），但不会触发毕业生标签自动计算。
+  // 毕业生标签仅由超级管理员设置并确认（grade_set_by_admin = TRUE 时才会自动刷新）。
+  if (req.body.grade !== undefined) {
+    const g = req.body.grade === '' || req.body.grade == null ? null : Number(req.body.grade);
+    sets.push('grade = ?');
+    params.push(g);
+    // 用户自行设置的年级不标记为管理员设置，也不刷新 tag，避免用户自助获得毕业生标签
   }
   if (sets.length === 0) return res.json({ ok: true });
   params.push(req.user.dbId);

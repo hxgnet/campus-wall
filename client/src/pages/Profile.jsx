@@ -32,6 +32,8 @@ export default function Profile() {
     show_real_name: false, show_class_name: false, show_address: false,
     show_email: false, show_wechat: false, show_qq: false, show_phone: false,
   });
+  const [grade, setGrade] = useState('');
+  const [gradeSetByAdmin, setGradeSetByAdmin] = useState(false);
 
   useEffect(() => {
     api.getUser(id).then((u) => {
@@ -61,6 +63,8 @@ export default function Profile() {
           show_qq: !!me.show_qq,
           show_phone: !!me.show_phone,
         });
+        setGrade(me.grade != null ? String(me.grade) : '');
+        setGradeSetByAdmin(!!me.grade_set_by_admin);
       }).catch(() => {});
     }
   }, [id, user]);
@@ -74,9 +78,12 @@ export default function Profile() {
 
   const saveProfile = async () => {
     try {
-      await api.updateProfile({ nickname, bio, ...extra, ...showFields });
+      const payload = { nickname, bio, ...extra, ...showFields };
+      if (grade.trim() !== '') payload.grade = Number(grade);
+      else payload.grade = null;
+      await api.updateProfile(payload);
       if (isMe) updateUser({ ...user, nickname, bio });
-      setProfile({ ...profile, nickname, bio });
+      setProfile({ ...profile, nickname, bio, grade: grade.trim() !== '' ? Number(grade) : null });
       setEditing(false);
     } catch (e) { alert(e.message); }
   };
@@ -123,6 +130,19 @@ export default function Profile() {
             <div>
               <input className="form-input" style={{ marginBottom: 8, textAlign: 'center' }} value={nickname} onChange={(e) => setNickname(e.target.value)} />
               <input className="form-input" style={{ marginBottom: 8 }} placeholder="个性签名" value={bio} onChange={(e) => setBio(e.target.value)} />
+              <div className="profile-field" style={{ marginBottom: 12 }}>
+                <label>入学年份</label>
+                <input
+                  className="form-input"
+                  type="number"
+                  placeholder="如 2023"
+                  value={grade}
+                  onChange={(e) => setGrade(e.target.value)}
+                />
+                <p className="anon-hint" style={{ marginTop: 4, textAlign: 'left' }}>
+                  可自行填写入学年份，但「毕业生」标签仅由超级管理员设置并确认，不会因入学满 3 年自动获得。
+                </p>
+              </div>
               <div className="profile-fields">
                 {PRIVATE_FIELDS.map((f) => (
                   <div className="profile-field" key={f.key}>
@@ -152,6 +172,14 @@ export default function Profile() {
                   {profile.grade != null && `${profile.grade}级`}
                   {profile.grade != null && profile.tag && ' · '}
                   {profile.tag === 'graduate' ? '🎓 毕业生' : profile.tag === 'student' ? '📚 在校生' : ''}
+                  {isMe && profile.grade != null && !gradeSetByAdmin && (
+                    <span style={{ fontSize: 12, color: 'var(--text-light)', marginLeft: 6 }}>（年级待管理员确认）</span>
+                  )}
+                </p>
+              )}
+              {isMe && (
+                <p style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 4, fontFamily: 'monospace' }}>
+                  ID：{profile.uid}
                 </p>
               )}
               <p style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 8 }}>
