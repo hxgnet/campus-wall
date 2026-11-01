@@ -119,6 +119,28 @@ export default function Admin() {
     } catch (e) { alert(e.message); }
   };
 
+  // 删除帖子下的评论（管理员 / 超管）
+  const deleteCommentAdmin = async (cid) => {
+    if (!confirm('确定删除该评论吗？')) return;
+    try {
+      await api.adminDeleteComment(cid);
+      setDetail((d) => (d ? {
+        ...d,
+        comments: (d.comments || []).filter((c) => c.id !== cid && c.parent_id !== cid),
+        stats: { ...d.stats, comments: Math.max(0, d.stats.comments - 1) },
+      } : d));
+    } catch (e) { alert(e.message); }
+  };
+
+  // 超管在用户详情中删除该用户的任意评论
+  const deleteUserComment = async (cid) => {
+    if (!confirm('确定删除该评论吗？')) return;
+    try {
+      await api.adminDeleteComment(cid);
+      setUserDetail((d) => (d ? { ...d, comments: (d.comments || []).filter((c) => c.id !== cid) } : d));
+    } catch (e) { alert(e.message); }
+  };
+
   const openDetail = async (id) => {
     setDetailLoading(true);
     try {
@@ -446,6 +468,11 @@ export default function Admin() {
               <div style={{ fontSize: 13, marginBottom: 8 }}>
                 <strong>举报原因：</strong>{r.reason}
               </div>
+              {r.reported_uid && (
+                <div style={{ fontSize: 13, marginBottom: 8 }}>
+                  <strong>举报用户 UID：</strong>{r.reported_uid}
+                </div>
+              )}
               {r.post_content && (
                 <div style={{ fontSize: 13, color: 'var(--text-light)', background: 'var(--bg)', padding: 8, borderRadius: 8 }}>
                   <strong>[{r.post_category}]</strong> {r.post_content}
@@ -687,6 +714,23 @@ export default function Admin() {
               </div>
             </div>
 
+            <div className="admin-detail-section">
+              <h4>评论管理（{detail.comments ? detail.comments.length : 0}）</h4>
+              {detail.comments && detail.comments.length > 0 ? detail.comments.map((c) => (
+                <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-light)' }}>
+                      {c.parent_id ? '↳ 回复 ' : ''}@{c.nickname} · {c.created_at}
+                    </div>
+                    <div style={{ fontSize: 13, wordBreak: 'break-word' }}>{c.content}</div>
+                  </div>
+                  <button className="btn-danger" style={{ padding: '4px 10px', fontSize: 12 }} onClick={() => deleteCommentAdmin(c.id)}>删除</button>
+                </div>
+              )) : (
+                <p style={{ color: 'var(--text-light)', fontSize: 13 }}>暂无评论</p>
+              )}
+            </div>
+
             <div className="admin-detail-actions">
               {detail.post.status === 'approved' && (
                 <button className={detail.post.is_hot ? 'btn btn-warning' : 'btn btn-success'} onClick={() => toggleHot(detail.post)}>
@@ -792,6 +836,32 @@ export default function Admin() {
                       {p.images && p.images.length > 0 && (
                         <div className="post-images" style={{ marginTop: 6 }}>
                           {p.images.map((img, i) => (<img key={i} src={img} alt="" style={{ width: 56, height: 56, objectFit: 'cover', marginRight: 4, cursor: 'pointer' }} onClick={() => setModalImg(img)} />))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>历史评论（{(userDetail.comments || []).length}）</h4>
+              {(userDetail.comments || []).length === 0 ? (
+                <p style={{ color: 'var(--text-light)', fontSize: 13 }}>该用户暂无评论</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {userDetail.comments.map((c) => (
+                    <div key={c.id} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                        <span style={{ fontSize: 12, color: 'var(--text-light)' }}>
+                          #{c.id} · 帖子 #{c.post_id} · {c.created_at}{c.parent_id ? ' · 回复' : ''}
+                        </span>
+                        <button className="btn-danger" style={{ padding: '3px 10px', fontSize: 12 }} onClick={() => deleteUserComment(c.id)}>删除</button>
+                      </div>
+                      <div style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>{c.content}</div>
+                      {c.post_content && (
+                        <div style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          原帖：{c.post_content}
                         </div>
                       )}
                     </div>

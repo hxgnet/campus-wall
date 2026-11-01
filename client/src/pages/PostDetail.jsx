@@ -17,10 +17,30 @@ export default function PostDetail() {
   const [favorited, setFavorited] = useState(false);
   const [showReport, setShowReport] = useState(false);
   const [reportReason, setReportReason] = useState('');
+  const [reportCommentId, setReportCommentId] = useState(null);
   const [replyTo, setReplyTo] = useState(null);
   const [replyText, setReplyText] = useState('');
   const [showEmoji, setShowEmoji] = useState(false);
   const isSuper = localStorage.getItem('admin_token') && sessionStorage.getItem('admin_role') === 'super';
+  const isAdminLogged = !!localStorage.getItem('admin_token') && ['admin', 'super'].includes(sessionStorage.getItem('admin_role'));
+
+  // 评论者本人 / 帖主 / 管理员可删除评论
+  const canDeleteComment = (c) => {
+    if (isAdminLogged) return true;
+    if (!user) return false;
+    if (c.user_id && c.user_id === user.uid) return true;
+    if (post && post.user_id && post.user_id === user.uid) return true;
+    return false;
+  };
+
+  const deleteComment = async (cid) => {
+    if (!confirm('确定删除这条评论吗？')) return;
+    try {
+      if (isAdminLogged) await api.adminDeleteComment(cid);
+      else await api.deleteComment(cid);
+      setComments((prev) => prev.filter((c) => c.id !== cid && c.parent_id !== cid));
+    } catch (e) { alert(e.message); }
+  };
 
   const load = async () => {
     setLoading(true);
@@ -89,10 +109,11 @@ export default function PostDetail() {
     if (!user) { alert('请先登录'); navigate('/login'); return; }
     if (!reportReason.trim()) { alert('请填写原因'); return; }
     try {
-      await api.report(id, null, reportReason);
+      await api.report(id, reportCommentId, reportReason);
       alert('举报已提交');
       setShowReport(false);
       setReportReason('');
+      setReportCommentId(null);
     } catch (e) { alert(e.message); }
   };
 
@@ -139,7 +160,7 @@ export default function PostDetail() {
             <button className={`post-action ${liked ? 'liked' : ''}`} onClick={handleLike}><span>{liked ? '❤️' : '🤍'}</span><span>{post.likes}</span></button>
             <button className={`post-action ${favorited ? 'liked' : ''}`} onClick={handleFavorite}><span>{favorited ? '⭐' : '☆'}</span><span>{favorited ? '已收藏' : '收藏'}</span></button>
             <span className="post-action"><span>👁️</span><span>{post.views}</span></span>
-            <button className="post-action" onClick={() => setShowReport(true)}><span>🚩</span><span>举报</span></button>
+            <button className="post-action" onClick={() => { setReportCommentId(null); setShowReport(true); }}><span>🚩</span><span>举报</span></button>
             {isSuper && <button className="post-action" onClick={superDelete} style={{ color: 'var(--danger)' }}><span>🗑️</span><span>超管删除</span></button>}
             {!post.is_anonymous && post.user_id ? (
               <span className="post-author" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
@@ -180,6 +201,10 @@ export default function PostDetail() {
                 <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
                   <button className="reply-link" onClick={() => likeComment(c.id)}>👍 {c.likes}</button>
                   <button className="reply-link" onClick={() => setReplyTo(replyTo === c.id ? null : c.id)}>回复</button>
+                  {canDeleteComment(c) && (
+                    <button className="reply-link" style={{ color: 'var(--danger)' }} onClick={() => deleteComment(c.id)}>删除</button>
+                  )}
+                  <button className="reply-link" onClick={() => { setReportCommentId(c.id); setShowReport(true); }}>举报</button>
                 </div>
                 {replyTo === c.id && (
                   <div className="reply-form">
@@ -206,7 +231,13 @@ export default function PostDetail() {
                           <span className="post-time">{r.created_at}</span>
                         </div>
                         <div className="comment-content">{r.content}</div>
-                        <button className="reply-link" onClick={() => likeComment(r.id)}>👍 {r.likes}</button>
+                        <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
+                          <button className="reply-link" onClick={() => likeComment(r.id)}>👍 {r.likes}</button>
+                          {canDeleteComment(r) && (
+                            <button className="reply-link" style={{ color: 'var(--danger)' }} onClick={() => deleteComment(r.id)}>删除</button>
+                          )}
+                          <button className="reply-link" onClick={() => { setReportCommentId(r.id); setShowReport(true); }}>举报</button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -237,12 +268,12 @@ export default function PostDetail() {
       {showReport && (
         <div className="modal-overlay" onClick={() => setShowReport(false)}>
           <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-            <h3>🚩 举报帖子</h3>
+            <h3>{reportCommentId ? '🚩 举报评论' : '🚩 举报帖子'}</h3>
             <div className="form-group">
               <textarea className="form-textarea" placeholder="请说明举报原因..." value={reportReason} onChange={(e) => setReportReason(e.target.value)} />
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
-              <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setShowReport(false)}>取消</button>
+              <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => { setShowReport(false); setReportCommentId(null); }}>取消</button>
               <button className="btn btn-danger" style={{ flex: 1 }} onClick={submitReport}>提交举报</button>
             </div>
           </div>

@@ -2,6 +2,11 @@ require('dotenv').config();
 const pg = require('pg');
 const { Pool, types } = pg;
 const bcrypt = require('bcryptjs');
+const { AsyncLocalStorage } = require('node:async_hooks');
+
+// Workers 中 TCP socket 与创建它的请求绑定，请求结束后 socket 失效。
+// 因此不能跨请求复用连接池：这里用 AsyncLocalStorage 给每个请求一个独立连接池。
+const requestPoolStore = new AsyncLocalStorage();
 
 // Cloudflare Workers 环境下用 pg-cloudflare 的 TCP Socket 替代 Node net（Workers 无 fs/net）
 let CFCloudflareSocket = null;
@@ -23,9 +28,12 @@ if (DB_CONFIG_MISSING) {
 // 避免 pg-connection-string 的解析结果覆盖我们设置的 ssl 选项
 function buildPoolConfig(rawUrl) {
   const cfg = {
-    max: Number(process.env.PG_POOL_MAX) || 10,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
+    // Workers 每个 isolate 都有独立连接池，Supabase 免费版连接数有限。
+    // 单 isolate 限制为 2 条连接，空闲 2s 释放，显著降低「连接超时」与复用失效连接的概率。
+    max: Number(process.env.PG_POOL_MAX) || (CFCloudflareSocket ? 2 : 10),
+    idleTimeoutMillis: CFCloudflareSocket ? 2000 : 30000,
+    connectionTimeoutMillis: CFCloudflareSocket ? 6000 : 10000,
+    keepAlive: true,
   };
   try {
     const u = new URL(rawUrl);
@@ -67,6 +75,20 @@ if (!DB_CONFIG_MISSING) {
 }
 
 const LOCAL_NOW = `to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS')`;
+
+// 每个请求独立的连接池（Workers 下 socket 不能跨请求复用）
+function createRequestPool() {
+  const p = new Pool(buildPoolConfig(DATABASE_URL));
+  p.on('error', (err) => console.error('[db] 请求连接池错误:', err && err.message ? err.message : err));
+  p.on('connect', (client) => {
+    client.on('error', (err) => console.error('[db] 连接错误:', err && err.message ? err.message : err));
+  });
+  return p;
+}
+
+function activePool() {
+  return requestPoolStore.getStore() || pool;
+}
 
 // ---------- SQLite → PostgreSQL 方言转换 ----------
 function transformSql(sql) {
@@ -184,15 +206,15 @@ function createFacade(runner) {
       const text = convertPlaceholders(transformSql(sql));
       return {
         async get(...args) {
-          const result = await runner(text, normalizeParams(args));
+          const result = await runner(text, normalizeParams(args), { write: false });
           return result.rows[0];
         },
         async all(...args) {
-          const result = await runner(text, normalizeParams(args));
+          const result = await runner(text, normalizeParams(args), { write: false });
           return result.rows;
         },
         async run(...args) {
-          const result = await runner(text, normalizeParams(args));
+          const result = await runner(text, normalizeParams(args), { write: true });
           const row = result.rows && result.rows[0];
           return {
             lastInsertRowid: row && typeof row.id !== 'undefined' ? row.id : undefined,
@@ -204,14 +226,65 @@ function createFacade(runner) {
   };
 }
 
-const db = createFacade((text, params) => pool.query(text, params));
+// ---------- 连接重试 ----------
+// Workers 中 TCP socket 与创建它的请求绑定：请求结束后 socket 会被关闭，
+// 而连接池仍把旧连接当作可用，导致「下一条请求」首次查询失败并抛出 1101。
+// 这类错误都发生在 SQL 执行之前，因此读/写都可以安全重试（换一条新连接）。
+const CONNECT_PHASE_RE = /timeout exceeded when trying to connect|Connection terminated|server closed the connection|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|Client has encountered a connection error|Cannot use a pool after/i;
+const TRANSIENT_RE = CONNECT_PHASE_RE;
+const TRANSIENT_CODES = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', '57P01', '57P02', '57P03'];
+
+function isTransient(err, strict) {
+  const msg = String((err && err.message) || '');
+  const code = err && err.code;
+  if (TRANSIENT_RE.test(msg) || TRANSIENT_CODES.includes(code)) return true;
+  if (strict) return false;
+  return false;
+}
+
+async function runWithRetry(fn, strict, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransient(err, strict) || i === attempts - 1) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 200 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+const db = createFacade((text, params, opts) => runWithRetry(() => activePool().query(text, params), !!(opts && opts.write)));
 db.pool = pool;
+
+// 在独立连接池上下文中执行一个请求（Workers 专用；Node 本地开发直接执行）
+db.runInRequestContext = async (fn) => {
+  if (!CFCloudflareSocket || DB_CONFIG_MISSING) return fn();
+  const reqPool = createRequestPool();
+  try {
+    return await requestPoolStore.run(reqPool, fn);
+  } finally {
+    try { await reqPool.end(); } catch (e) { console.error('[db] 关闭请求连接池失败:', e && e.message); }
+  }
+};
 
 // 事务：传入一个绑定到同一连接的 tx 门面
 db.transaction = async (fn) => {
-  const client = await pool.connect();
+  let client;
+  // 连接池可能返回已失效的旧连接；BEGIN 失败时销毁该连接并重连
+  for (let attempt = 0; ; attempt += 1) {
+    client = await runWithRetry(() => activePool().connect(), true);
+    try {
+      await client.query('BEGIN');
+      break;
+    } catch (err) {
+      client.release(true);
+      if (!isTransient(err, true) || attempt >= 2) throw err;
+    }
+  }
   try {
-    await client.query('BEGIN');
     const tx = createFacade((text, params) => client.query(text, params));
     const result = await fn(tx);
     await client.query('COMMIT');
@@ -304,10 +377,22 @@ const DDL = `
     post_id INTEGER,
     comment_id INTEGER,
     user_id INTEGER,
+    reported_uid TEXT,
     reason TEXT NOT NULL,
     status TEXT DEFAULT 'pending',
     created_at TEXT NOT NULL DEFAULT ${LOCAL_NOW}
   );
+
+  -- 用户拉黑关系（私信场景）：blocker 主动拉黑 blocked
+  CREATE TABLE IF NOT EXISTS blocks (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    blocker_uid TEXT NOT NULL,
+    blocked_uid TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT ${LOCAL_NOW},
+    UNIQUE (blocker_uid, blocked_uid)
+  );
+
+  ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_uid TEXT;
 
   CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,

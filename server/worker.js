@@ -111,7 +111,9 @@ export default {
   async fetch(request, env, ctx) {
     try {
       const app = await getApp(env);
-      return await runExpress(app, request);
+      // 每个请求使用独立数据库连接池：Workers 的 TCP socket 不能跨请求复用，
+      // 复用失效 socket 会导致查询异常（线上表现为 1101 / 超时）。
+      return await app.db.runInRequestContext(() => runExpress(app, request));
     } catch (err) {
       const detail = err && err.stack ? err.stack : String(err && err.message || err);
       return new Response(

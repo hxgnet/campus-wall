@@ -413,7 +413,38 @@ app.get('/api/users/:id', async (req, res) => {
   for (const f of contactFields) {
     if (user[`show_${f}`]) out[f] = user[f];
   }
+  // 拉黑状态（供主页按钮显示）
+  if (viewer && viewer.uid !== user.uid) {
+    out.blocked_by_me = !!(await db.prepare(`SELECT id FROM blocks WHERE blocker_uid = ? AND blocked_uid = ?`).get(viewer.uid, user.uid));
+    out.blocked_me = !!(await db.prepare(`SELECT id FROM blocks WHERE blocker_uid = ? AND blocked_uid = ?`).get(user.uid, viewer.uid));
+  }
   res.json(out);
+});
+
+// ---------- Blocks ----------
+// 我拉黑的用户列表
+app.get('/api/blocks', auth, async (req, res) => {
+  const list = await db.prepare(
+    `SELECT b.blocked_uid AS uid, b.created_at, u.nickname, u.avatar, u.username
+     FROM blocks b LEFT JOIN users u ON u.uid = b.blocked_uid
+     WHERE b.blocker_uid = ? ORDER BY b.id DESC`
+  ).all(req.user.uid);
+  res.json(list);
+});
+
+// 拉黑 / 取消拉黑（切换）
+app.post('/api/blocks/:uid', auth, async (req, res) => {
+  const targetUid = req.params.uid;
+  if (targetUid === req.user.uid) return res.status(400).json({ error: '不能拉黑自己' });
+  const target = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(targetUid);
+  if (!target) return res.status(404).json({ error: '用户不存在' });
+  const existing = await db.prepare(`SELECT id FROM blocks WHERE blocker_uid = ? AND blocked_uid = ?`).get(req.user.uid, targetUid);
+  if (existing) {
+    await db.prepare(`DELETE FROM blocks WHERE id = ?`).run(existing.id);
+    return res.json({ blocked: false });
+  }
+  await db.prepare(`INSERT INTO blocks (blocker_uid, blocked_uid) VALUES (?, ?) ON CONFLICT DO NOTHING`).run(req.user.uid, targetUid);
+  res.json({ blocked: true });
 });
 
 // Follow / unfollow
@@ -629,6 +660,31 @@ app.post('/api/comments/:id/like', auth, async (req, res) => {
   res.json({ likes });
 });
 
+// 删除评论：评论者本人 / 帖主 / 管理员 / 超管 均可删除
+app.delete('/api/comments/:id', async (req, res) => {
+  const cid = req.params.id;
+  if (!/^\d+$/.test(String(cid))) return res.status(404).json({ error: '评论不存在' });
+  const comment = await db.prepare(
+    `SELECT c.id, c.user_id, c.post_id, p.user_id AS post_owner FROM comments c JOIN posts p ON p.id = c.post_id WHERE c.id = ?`
+  ).get(cid);
+  if (!comment) return res.status(404).json({ error: '评论不存在' });
+
+  const viewer = await getCurrentUser(req);
+  const token = req.headers['x-admin-token'];
+  const isAdmin = token === SUPER_ADMIN_PASSWORD || token === ADMIN_PASSWORD || (viewer && ['admin', 'super'].includes(viewer.role));
+  const isCommenter = viewer && comment.user_id && viewer.dbId === comment.user_id;
+  const isPostOwner = viewer && comment.post_owner && viewer.dbId === comment.post_owner;
+  if (!isAdmin && !isCommenter && !isPostOwner) return res.status(403).json({ error: '无权删除该评论' });
+
+  await db.transaction(async (tx) => {
+    // 清理该评论及其子回复关联的举报 / 点赞（评论本身级联删除）
+    await tx.prepare(`DELETE FROM reports WHERE comment_id = ? OR comment_id IN (SELECT id FROM comments WHERE parent_id = ?)`).run(cid, cid);
+    await tx.prepare(`DELETE FROM comment_likes WHERE comment_id = ? OR comment_id IN (SELECT id FROM comments WHERE parent_id = ?)`).run(cid, cid);
+    await tx.prepare(`DELETE FROM comments WHERE id = ?`).run(cid);
+  });
+  res.json({ ok: true });
+});
+
 // ---------- Favorites ----------
 app.post('/api/posts/:id/favorite', auth, async (req, res) => {
   const post = await db.prepare(`SELECT id FROM posts WHERE id = ?`).get(req.params.id);
@@ -658,10 +714,12 @@ app.get('/api/favorites', auth, async (req, res) => {
 // ---------- Reports ----------
 // 未登录用户不可举报
 app.post('/api/reports', auth, async (req, res) => {
-  const { postId, commentId, reason } = req.body;
-  if (!reason) return res.status(400).json({ error: '请填写举报原因' });
-  await db.prepare(`INSERT INTO reports (post_id, comment_id, user_id, reason) VALUES (?, ?, ?, ?) RETURNING id`)
-    .run(postId || null, commentId || null, req.user.dbId, reason);
+  const { postId, commentId, reason, reportedUid } = req.body;
+  if (!reason || !String(reason).trim()) return res.status(400).json({ error: '请填写举报原因' });
+  if (!postId && !commentId && !reportedUid) return res.status(400).json({ error: '请选择举报对象' });
+  if (reportedUid && reportedUid === req.user.uid) return res.status(400).json({ error: '不能举报自己' });
+  await db.prepare(`INSERT INTO reports (post_id, comment_id, user_id, reason, reported_uid) VALUES (?, ?, ?, ?, ?) RETURNING id`)
+    .run(postId || null, commentId || null, req.user.dbId, String(reason).trim(), reportedUid || null);
   res.json({ ok: true, message: '举报已提交，管理员会尽快处理' });
 });
 
@@ -764,8 +822,12 @@ app.get('/api/messages/conversations', auth, async (req, res) => {
 
   const peers = [];
   const map = new Map();
+  // 已拉黑的用户不出现在会话列表
+  const blockedRows = await db.prepare(`SELECT blocked_uid FROM blocks WHERE blocker_uid = ?`).all(req.user.uid);
+  const blockedSet = new Set(blockedRows.map((r) => r.blocked_uid));
   for (const m of rows) {
     const peer = m.from_uid === req.user.uid ? m.to_uid : m.from_uid;
+    if (blockedSet.has(peer)) continue;
     if (!map.has(peer)) {
       map.set(peer, { uid: peer, last_content: m.content, last_time: m.created_at, unread: 0 });
       peers.push(peer);
@@ -800,6 +862,13 @@ app.get('/api/messages/:uid', auth, async (req, res) => {
   res.json(list);
 });
 
+// 仅标记已读（用于消息页轮询 / 已读回执）
+app.post('/api/messages/read/:uid', auth, async (req, res) => {
+  await db.prepare(`UPDATE messages SET read = TRUE WHERE from_uid = ? AND to_uid = ? AND read = FALSE`)
+    .run(req.params.uid, req.user.uid);
+  res.json({ ok: true });
+});
+
 app.post('/api/messages', auth, async (req, res) => {
   const { to, content } = req.body;
   if (!to) return res.status(400).json({ error: '请选择接收者' });
@@ -807,6 +876,11 @@ app.post('/api/messages', auth, async (req, res) => {
   if (to === req.user.uid) return res.status(400).json({ error: '不能给自己发私信' });
   const peer = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(to);
   if (!peer) return res.status(404).json({ error: '用户不存在' });
+  // 任一方向存在拉黑关系则禁止私信
+  const blocked = await db.prepare(
+    `SELECT id FROM blocks WHERE (blocker_uid = ? AND blocked_uid = ?) OR (blocker_uid = ? AND blocked_uid = ?)`
+  ).get(req.user.uid, to, to, req.user.uid);
+  if (blocked) return res.status(403).json({ error: '由于拉黑关系，无法发送私信' });
   const text = String(content).trim();
   const result = await db.prepare(
     `INSERT INTO messages (from_uid, to_uid, content) VALUES (?, ?, ?) RETURNING id`
@@ -878,10 +952,17 @@ app.get('/api/admin/posts/:id', adminAuth, async (req, res) => {
     : null;
   post.user_id = author ? author.uid : null;
   const commentCount = (await db.prepare(`SELECT COUNT(*) as c FROM comments WHERE post_id = ?`).get(req.params.id)).c;
+  const comments = await db.prepare(
+    `SELECT c.id, c.parent_id, c.content, c.nickname, c.created_at, c.likes,
+            CASE WHEN c.user_id IS NULL THEN NULL ELSE u.uid END AS user_id
+     FROM comments c LEFT JOIN users u ON u.id = c.user_id
+     WHERE c.post_id = ? ORDER BY c.id ASC`
+  ).all(req.params.id);
 
   res.json({
     post,
     author,
+    comments,
     stats: { comments: commentCount, likes: post.likes },
     is_anonymous: !!post.is_anonymous,
     client_ip: post.client_ip || '',
@@ -1037,8 +1118,14 @@ app.get('/api/admin/users/:uid/detail', superAuth, async (req, res) => {
       try { p.images = p.images ? JSON.parse(p.images) : []; } catch { p.images = []; }
       try { p.tags = p.tags ? JSON.parse(p.tags) : []; } catch { p.tags = []; }
     });
+    const comments = await db.prepare(
+      `SELECT c.id, c.post_id, c.content, c.created_at, c.parent_id,
+              p.content AS post_content
+       FROM comments c LEFT JOIN posts p ON p.id = c.post_id
+       WHERE c.user_id = ? ORDER BY c.id DESC LIMIT 500`
+    ).all(u.id);
     const { password_enc, password_hash, ...user } = u;
-    res.json({ user, password_plain, password_recoverable: !!u.password_enc, password_hash, posts });
+    res.json({ user, password_plain, password_recoverable: !!u.password_enc, password_hash, posts, comments });
   } catch (e) {
     console.error('[admin-user-detail] error:', e.message, e.stack);
     res.status(500).json({ error: e.message });
@@ -1329,3 +1416,5 @@ if (require.main === module) {
 // Serverless 平台（Netlify）复用的导出
 module.exports = app;
 module.exports.ready = db.ready;
+// Worker 入口需要 db 来为每个请求创建独立连接池（避免跨请求复用失效 socket）
+module.exports.db = db;

@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 # 非敏感配置
-PG_POOL_MAX = "5"
+PG_POOL_MAX = "2"
 
 # 以下敏感值通过 `wrangler secret put` 注入：
 # DATABASE_URL, JWT_SECRET, ADMIN_PASSWORD, SUPER_ADMIN_PASSWORD,

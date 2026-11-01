@@ -62,10 +62,19 @@ export const api = {
   addComment: (id, content, parentId) =>
     request(`/posts/${id}/comments`, { method: 'POST', body: JSON.stringify({ content, parentId }) }),
   likeComment: (id) => request(`/comments/${id}/like`, { method: 'POST' }),
+  deleteComment: (id) => request(`/comments/${id}`, { method: 'DELETE' }),
+  adminDeleteComment: (id) =>
+    request(`/comments/${id}`, { method: 'DELETE', headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
 
   // Reports
   report: (postId, commentId, reason) =>
     request('/reports', { method: 'POST', body: JSON.stringify({ postId, commentId, reason }) }),
+  reportUser: (reportedUid, reason) =>
+    request('/reports', { method: 'POST', body: JSON.stringify({ reportedUid, reason }) }),
+
+  // Blocks
+  getBlocks: () => request('/blocks'),
+  blockUser: (uid) => request(`/blocks/${uid}`, { method: 'POST' }),
 
   // Notifications
   getNotifications: () => request('/notifications'),
@@ -84,6 +93,7 @@ export const api = {
   getConversation: (uid) => request(`/messages/${uid}`),
   sendMessage: (to, content) =>
     request('/messages', { method: 'POST', body: JSON.stringify({ to, content }) }),
+  markMessageRead: (uid) => request(`/messages/read/${uid}`, { method: 'POST' }),
 
   // Upload
   uploadAvatar: (file) => {

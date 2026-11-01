@@ -25,6 +25,7 @@ export default function Profile() {
   const [nickname, setNickname] = useState('');
   const [bio, setBio] = useState('');
   const [friendStatus, setFriendStatus] = useState('none');
+  const [blocked, setBlocked] = useState(false);
   const [extra, setExtra] = useState({
     real_name: '', class_name: '', address: '', email: '', wechat: '', qq: '', phone: '',
   });
@@ -41,6 +42,7 @@ export default function Profile() {
       setNickname(u.nickname);
       setBio(u.bio || '');
       setIsMe(user && user.uid === id);
+      setBlocked(!!u.blocked_by_me);
     }).catch(() => {});
     api.getPosts({ userId: id, pageSize: 50 }).then((d) => setPosts(d.posts)).catch(() => {});
     if (user && user.uid === id) {
@@ -112,6 +114,14 @@ export default function Profile() {
     try {
       const r = await api.requestFriend(id);
       setFriendStatus(r.status === 'accepted' ? 'friend' : 'requested');
+    } catch (e) { alert(e.message); }
+  };
+
+  const toggleBlock = async () => {
+    try {
+      const r = await api.blockUser(id);
+      setBlocked(r.blocked);
+      alert(r.blocked ? '已拉黑该用户，双方将无法发送私信' : '已取消拉黑');
     } catch (e) { alert(e.message); }
   };
 
@@ -229,7 +239,12 @@ export default function Profile() {
                   ) : (
                     <button className="btn btn-primary" onClick={addFriend}>加好友</button>
                   )}
-                  <button className="btn btn-secondary" onClick={() => navigate(`/messages/${id}`)}>发私信</button>
+                  <button className="btn btn-secondary" onClick={() => navigate(`/messages/${id}`)} disabled={blocked || profile.blocked_me}>
+                    {profile.blocked_me && !blocked ? '对方已拉黑你' : '发私信'}
+                  </button>
+                  <button className="btn btn-secondary" style={{ color: blocked ? 'var(--text-light)' : 'var(--danger)' }} onClick={toggleBlock}>
+                    {blocked ? '已拉黑（点击取消）' : '拉黑'}
+                  </button>
                 </div>
               )}
             </div>
