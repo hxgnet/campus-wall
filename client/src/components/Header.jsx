@@ -51,6 +51,7 @@ export default function Header() {
               <NavLink to="/apply">申请</NavLink>
               <NavLink to="/notifications" className="notif-badge" data-count={unread > 0 ? unread : ''}>通知</NavLink>
               <NavLink to="/favorites">收藏</NavLink>
+              {(user.role === 'admin' || user.role === 'super') && <NavLink to="/admin">管理</NavLink>}
               <NavLink to={`/profile/${user.uid}`}>{user.nickname}</NavLink>
               <button className="back-btn" style={{ color: '#fff', margin: 0 }} onClick={() => { logout(); navigate('/'); }}>退出</button>
             </>

@@ -927,15 +927,23 @@ app.get('/api/admin/users', adminAuth, async (req, res) => {
 });
 
 app.put('/api/admin/users/:id', superAuth, async (req, res) => {
-  const { role } = req.body;
-  if (!['user', 'admin', 'super'].includes(role)) return res.status(400).json({ error: '无效角色' });
-  await db.prepare(`UPDATE users SET role = ? WHERE uid = ?`).run(role, req.params.id);
-  res.json({ ok: true });
+  try {
+    const { role } = req.body || {};
+    if (!['user', 'admin', 'super'].includes(role)) return res.status(400).json({ error: '无效角色' });
+    await db.prepare(`UPDATE users SET role = ? WHERE uid = ?`).run(role, req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.delete('/api/admin/users/:id', superAuth, async (req, res) => {
-  await db.prepare(`DELETE FROM users WHERE uid = ?`).run(req.params.id);
-  res.json({ ok: true });
+  try {
+    await db.prepare(`DELETE FROM users WHERE uid = ?`).run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ---------- 用户申请（图文）----------
