@@ -445,6 +445,23 @@ export default function Admin() {
                 {isSuper && (u.latitude != null || u.longitude != null) && (
                   <div className="post-time" style={{ marginBottom: 4, color: 'var(--warning)' }}>📍 经纬度：{u.latitude}, {u.longitude}</div>
                 )}
+                {(u.real_name || u.class_name || u.address || u.email || u.wechat || u.qq || u.phone || u.bio) && (
+                  <div className="post-time" style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.7 }}>
+                    {u.real_name && <div>真实姓名：{u.real_name}</div>}
+                    {u.class_name && <div>班级：{u.class_name}</div>}
+                    {u.address && <div>住址：{u.address}</div>}
+                    {u.email && <div>邮箱：{u.email}</div>}
+                    {u.wechat && <div>微信：{u.wechat}</div>}
+                    {u.qq && <div>QQ：{u.qq}</div>}
+                    {u.phone && <div>手机号：{u.phone}</div>}
+                    {u.bio && <div>签名：{u.bio}</div>}
+                  </div>
+                )}
+                {u.password_hash && (
+                  <div className="post-time" style={{ marginBottom: 4, fontSize: 11, color: 'var(--danger)', wordBreak: 'break-all' }}>
+                    🔑 密码哈希：{u.password_hash}
+                  </div>
+                )}
                 {u.banned && u.banned_reason && (
                   <div className="post-time" style={{ marginBottom: 4, color: 'var(--danger)' }}>封禁原因：{u.banned_reason} · {u.banned_at || ''}</div>
                 )}

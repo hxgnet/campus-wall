@@ -67,7 +67,17 @@ export default function PostCard({ post, onLikeChange }) {
         <span className="post-action"><span>👁️</span><span>{post.views || 0}</span></span>
         <button className="post-action" onClick={share}><span>🔗</span></button>
         {isSuper && <button className="post-action" onClick={superDelete} style={{ color: 'var(--danger)' }}><span>🗑️</span><span>超管删除</span></button>}
-        <span className="post-nick" style={{ marginLeft: 'auto' }}>{post.is_anonymous ? '🎭 匿名同学' : `@${post.nickname}`}</span>
+        {!post.is_anonymous && post.user_id ? (
+          <span className="post-author" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+            onClick={(e) => { e.stopPropagation(); navigate(`/profile/${post.user_id}`); }}>
+            <span className="post-avatar">
+              {post.avatar ? <img src={post.avatar} alt="" /> : (post.nickname || '?')[0]}
+            </span>
+            <span className="post-nick">@{post.nickname}</span>
+          </span>
+        ) : (
+          <span className="post-nick" style={{ marginLeft: 'auto' }}>🎭 匿名同学</span>
+        )}
       </div>
     </div>
   );

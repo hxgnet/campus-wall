@@ -141,7 +141,17 @@ export default function PostDetail() {
             <span className="post-action"><span>👁️</span><span>{post.views}</span></span>
             <button className="post-action" onClick={() => setShowReport(true)}><span>🚩</span><span>举报</span></button>
             {isSuper && <button className="post-action" onClick={superDelete} style={{ color: 'var(--danger)' }}><span>🗑️</span><span>超管删除</span></button>}
-            <span className="post-nick" style={{ marginLeft: 'auto' }}>{post.is_anonymous ? '🎭 匿名同学' : `@${post.nickname}`}</span>
+            {!post.is_anonymous && post.user_id ? (
+              <span className="post-author" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+                onClick={() => navigate(`/profile/${post.user_id}`)}>
+                <span className="post-avatar">
+                  {post.avatar ? <img src={post.avatar} alt="" /> : (post.nickname || '?')[0]}
+                </span>
+                <span className="post-nick">@{post.nickname}</span>
+              </span>
+            ) : (
+              <span className="post-nick" style={{ marginLeft: 'auto' }}>🎭 匿名同学</span>
+            )}
           </div>
         </div>
 
@@ -153,7 +163,17 @@ export default function PostDetail() {
             <div key={c.id}>
               <div className="comment-item">
                 <div className="comment-head">
-                  <span className="comment-nick">@{c.nickname}</span>
+                  {c.user_id ? (
+                    <span className="post-author" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+                      onClick={() => navigate(`/profile/${c.user_id}`)}>
+                      <span className="post-avatar" style={{ width: 22, height: 22, fontSize: 11 }}>
+                        {c.avatar ? <img src={c.avatar} alt="" /> : (c.nickname || '?')[0]}
+                      </span>
+                      <span className="comment-nick">@{c.nickname}</span>
+                    </span>
+                  ) : (
+                    <span className="comment-nick">@{c.nickname}</span>
+                  )}
                   <span className="post-time">{c.created_at}</span>
                 </div>
                 <div className="comment-content">{c.content}</div>
@@ -172,7 +192,17 @@ export default function PostDetail() {
                     {repliesOf(c.id).map((r) => (
                       <div className="comment-item" key={r.id}>
                         <div className="comment-head">
-                          <span className="comment-nick">@{r.nickname}</span>
+                          {r.user_id ? (
+                            <span className="post-author" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+                              onClick={() => navigate(`/profile/${r.user_id}`)}>
+                              <span className="post-avatar" style={{ width: 22, height: 22, fontSize: 11 }}>
+                                {r.avatar ? <img src={r.avatar} alt="" /> : (r.nickname || '?')[0]}
+                              </span>
+                              <span className="comment-nick">@{r.nickname}</span>
+                            </span>
+                          ) : (
+                            <span className="comment-nick">@{r.nickname}</span>
+                          )}
                           <span className="post-time">{r.created_at}</span>
                         </div>
                         <div className="comment-content">{r.content}</div>

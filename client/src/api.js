@@ -33,6 +33,7 @@ export const api = {
   updateProfile: (data) =>
     request('/auth/profile', { method: 'PUT', body: JSON.stringify(data) }),
   getUser: (id) => request(`/users/${id}`),
+  searchUsers: (q) => request(`/users/search?q=${encodeURIComponent(q)}`),
   followUser: (id) => request(`/users/${id}/follow`, { method: 'POST' }),
 
   // Posts

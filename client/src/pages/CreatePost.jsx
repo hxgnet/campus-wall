@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, CATEGORIES, EMOJIS } from '../api.js';
 import { useAuth } from '../AuthContext.jsx';
@@ -8,13 +8,15 @@ export default function CreatePost() {
   const { user } = useAuth();
   const [category, setCategory] = useState(CATEGORIES[0].name);
   const [content, setContent] = useState('');
-  const [nickname, setNickname] = useState('');
   const [anonymous, setAnonymous] = useState(false);
   const [tagInput, setTagInput] = useState('');
   const [tags, setTags] = useState([]);
   const [images, setImages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showEmoji, setShowEmoji] = useState(false);
+  const [mentionList, setMentionList] = useState([]);
+  const [mentionPos, setMentionPos] = useState(null);
+  const textareaRef = useRef(null);
 
   if (!user) {
     return (
@@ -46,6 +48,55 @@ export default function CreatePost() {
     }
   };
 
+  // @提及 自动补全
+  const handleContentChange = (e) => {
+    const val = e.target.value;
+    setContent(val);
+    const cursor = e.target.selectionStart;
+    // 找到光标前最近的 @
+    const before = val.slice(0, cursor);
+    const match = before.match(/@([a-zA-Z0-9_\u4e00-\u9fa5]{0,20})$/);
+    if (match) {
+      const q = match[1];
+      if (q.length > 0) {
+        api.searchUsers(q).then(setMentionList).catch(() => {});
+        const ta = textareaRef.current;
+        if (ta) {
+          const rect = ta.getBoundingClientRect();
+          setMentionPos({ top: rect.top - 120, left: rect.left });
+        }
+      } else {
+        setMentionList([]);
+      }
+    } else {
+      setMentionList([]);
+    }
+  };
+
+  const insertMention = (username) => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const cursor = ta.selectionStart;
+    const before = content.slice(0, cursor);
+    const after = content.slice(cursor);
+    const newBefore = before.replace(/@([a-zA-Z0-9_\u4e00-\u9fa5]{0,20})$/, `@${username} `);
+    setContent(newBefore + after);
+    setMentionList([]);
+    setTimeout(() => {
+      ta.focus();
+      const pos = newBefore.length;
+      ta.setSelectionRange(pos, pos);
+    }, 0);
+  };
+
+  useEffect(() => {
+    const close = () => setMentionList([]);
+    if (mentionList.length > 0) {
+      document.addEventListener('click', close);
+      return () => document.removeEventListener('click', close);
+    }
+  }, [mentionList]);
+
   const submit = async (e) => {
     e.preventDefault();
     if (!content.trim()) { alert('请输入内容'); return; }
@@ -54,7 +105,6 @@ export default function CreatePost() {
       const fd = new FormData();
       fd.append('category', category);
       fd.append('content', content);
-      fd.append('nickname', nickname || user.nickname);
       fd.append('anonymous', anonymous ? 'true' : 'false');
       fd.append('tags', JSON.stringify(tags));
       images.forEach((img) => fd.append('images', img.file));
@@ -79,9 +129,29 @@ export default function CreatePost() {
             </div>
           </div>
 
-          <div className="form-group">
+          <div className="form-group" style={{ position: 'relative' }}>
             <label className="form-label">内容 <span style={{ color: 'var(--danger)' }}>*</span></label>
-            <textarea className="form-textarea" placeholder="说点什么吧..." value={content} onChange={(e) => setContent(e.target.value)} maxLength={3000} />
+            <textarea
+              ref={textareaRef}
+              className="form-textarea"
+              placeholder="说点什么吧... 输入 @ 可提及其他用户"
+              value={content}
+              onChange={handleContentChange}
+              maxLength={3000}
+            />
+            {mentionList.length > 0 && mentionPos && (
+              <div className="mention-dropdown" style={{ top: mentionPos.top, left: mentionPos.left }} onClick={(e) => e.stopPropagation()}>
+                {mentionList.map((u) => (
+                  <div key={u.uid} className="mention-item" onClick={() => insertMention(u.username)}>
+                    <span className="post-avatar" style={{ width: 24, height: 24, fontSize: 11 }}>
+                      {u.avatar ? <img src={u.avatar} alt="" /> : (u.nickname || '?')[0]}
+                    </span>
+                    <span>@{u.username}</span>
+                    <span style={{ color: 'var(--text-light)', fontSize: 12 }}>{u.nickname}</span>
+                  </div>
+                ))}
+              </div>
+            )}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
               <button type="button" className="reply-link" onClick={() => setShowEmoji(!showEmoji)}>😊 表情</button>
               <span style={{ fontSize: 12, color: 'var(--text-light)' }}>{content.length}/3000</span>
@@ -127,16 +197,12 @@ export default function CreatePost() {
           </div>
 
           <div className="form-group">
-            <label className="form-label">昵称（默认使用你的账号昵称）</label>
-            <input className="form-input" placeholder={user.nickname} value={nickname} onChange={(e) => setNickname(e.target.value)} maxLength={20} />
-          </div>
-
-          <div className="form-group">
+            <p style={{ fontSize: 13, color: 'var(--text-light)', margin: '4px 0' }}>发帖昵称将使用你当前的昵称「{user.nickname}」</p>
             <label className="anon-toggle">
               <input type="checkbox" checked={anonymous} onChange={(e) => setAnonymous(e.target.checked)} />
               <span>匿名发布（管理员仍可见真实身份）</span>
             </label>
-            <p className="anon-hint">开启后其他同学只会看到「匿名同学」，看不到你的昵称与主页入口；管理员仍可核查真实身份。</p>
+            <p className="anon-hint">开启后其他同学只会看到「匿名同学」，看不到你的昵称、头像与主页入口；管理员仍可核查真实身份。</p>
           </div>
 
           <button type="submit" className="btn btn-primary btn-block" disabled={loading}>{loading ? '发布中...' : '发布帖子'}</button>

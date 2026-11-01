@@ -137,7 +137,8 @@ const PUBLIC_POST_FIELDS = `
   p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
   p.is_anonymous, p.is_staff, p.staff_role,
   CASE WHEN p.is_anonymous THEN NULL ELSE u.uid END AS user_id,
-  CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname
+  CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname,
+  CASE WHEN p.is_anonymous THEN NULL ELSE u.avatar END AS avatar
 `;
 
 // ---------- Helper: 风控 ----------
@@ -331,6 +332,19 @@ app.delete('/api/auth/account', auth, async (req, res) => {
   await db.prepare(`DELETE FROM users WHERE id = ?`).run(dbId);
   res.json({ ok: true });
 });
+// 用户搜索（用于 @提及 自动补全），仅返回 uid/username/nickname/avatar
+// 必须放在 /api/users/:id 之前，避免 "search" 被当作 :id 捕获
+app.get('/api/users/search', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.json([]);
+  const list = await db.prepare(
+    `SELECT uid, username, nickname, avatar FROM users
+     WHERE username ILIKE ? OR nickname ILIKE ?
+     ORDER BY (username ILIKE ?) DESC, id DESC LIMIT 10`
+  ).all(`%${q}%`, `%${q}%`, `${q}%`);
+  res.json(list);
+});
+
 app.get('/api/users/:id', async (req, res) => {
   const user = await db.prepare(
     `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation,
@@ -436,7 +450,7 @@ app.get('/api/posts/:id', async (req, res) => {
 });
 
 app.post('/api/posts', auth, upload.array('images', 9), async (req, res) => {
-  const { category, content, nickname, tags, anonymous } = req.body;
+  const { category, content, tags, anonymous } = req.body;
   if (!category || !content || !content.trim()) return res.status(400).json({ error: '分类和内容不能为空' });
   if (content.length > 3000) return res.status(400).json({ error: '内容不能超过3000字' });
   // 敏感词检测
@@ -461,13 +475,28 @@ app.post('/api/posts', auth, upload.array('images', 9), async (req, res) => {
   const isStaff = req.user.role === 'admin' || req.user.role === 'super';
   const status = isStaff ? 'approved' : 'pending';
   const staffRole = isStaff ? req.user.role : null;
+  // 发帖昵称固定使用用户设置的昵称
+  const postNickname = (req.user.nickname || '').trim();
   const result = await db.prepare(
     `INSERT INTO posts (user_id, category, content, tags, nickname, images, is_anonymous, client_ip, user_agent, status, is_staff, staff_role)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
   ).run(
-    req.user.dbId, category, content.trim(), JSON.stringify(tagArr), (nickname || req.user.nickname).trim(),
+    req.user.dbId, category, content.trim(), JSON.stringify(tagArr), postNickname,
     JSON.stringify(images), isAnonymous, clientIp, userAgent, status, isStaff, staffRole
   );
+
+  // 解析 @用户名 提及并通知被提及用户（仅非匿名帖）
+  if (!isAnonymous) {
+    const mentionMatches = content.match(/@([a-zA-Z0-9_\u4e00-\u9fa5]{2,20})/g) || [];
+    const mentionedUsernames = [...new Set(mentionMatches.map((m) => m.slice(1)))];
+    for (const uname of mentionedUsernames) {
+      const target = await db.prepare(`SELECT id, uid FROM users WHERE username = ? AND id != ?`).get(uname, req.user.dbId);
+      if (target) {
+        await notify(target.id, 'mention', req.user.uid, result.lastInsertRowid, `@${req.user.nickname} 在帖子中提及了你`);
+      }
+    }
+  }
+
   res.json({
     id: result.lastInsertRowid,
     message: isStaff ? '发布成功' : '发布成功，等待管理员审核',
@@ -911,8 +940,8 @@ app.get('/api/admin/users', superAuth, async (req, res) => {
       await db.prepare(`UPDATE users SET tag = ? WHERE id = ? AND (tag IS DISTINCT FROM ?)`).run(tag, u.id, tag);
     }
   } catch (e) { console.error('[tag-refresh] 失败:', e.message); }
-  // 超级管理员可查看用户全部个人信息
-  const select = `uid, username, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
+  // 超级管理员可查看用户全部个人信息（含账号、密码哈希等敏感字段）
+  const select = `uid, username, password_hash, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
        grade, tag, grade_set_by_admin, latitude, longitude,
        real_name, class_name, address, email, wechat, qq, phone, bio`;
   try {

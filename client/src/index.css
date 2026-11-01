@@ -210,6 +210,44 @@ img { max-width: 100%; display: block; }
   color: var(--text-light);
   font-weight: 500;
 }
+.post-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.post-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.post-author:hover .post-nick { color: var(--primary); text-decoration: underline; }
+
+/* @提及 下拉 */
+.mention-dropdown {
+  position: fixed;
+  z-index: 100;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  max-height: 220px;
+  overflow-y: auto;
+  min-width: 220px;
+}
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.mention-item:hover { background: var(--bg-hover); }
 
 /* Category colors */
 .cat-表白墙 { background: #fce7f3; color: #db2777; }
