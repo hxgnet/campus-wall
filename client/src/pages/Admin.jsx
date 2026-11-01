@@ -284,7 +284,7 @@ export default function Admin() {
           <button className="btn btn-secondary" onClick={logout}>退出登录</button>
         </div>
 
-        {stats && (
+        {isSuper && stats && (
           <div className="admin-stat-cards">
             <div className="stat-card"><div className="stat-num">{stats.totalPosts}</div><div className="stat-label">总帖子</div></div>
             <div className="stat-card"><div className="stat-num" style={{ color: 'var(--warning)' }}>{stats.pendingPosts}</div><div className="stat-label">待审核</div></div>
@@ -298,14 +298,14 @@ export default function Admin() {
         <div className="cat-tabs" style={{ paddingTop: 0 }}>
           {[
             { k: 'posts', l: '📝 帖子审核' },
-            { k: 'applications', l: '📨 申请处理' },
             { k: 'reports', l: '🚩 举报处理' },
             ...(isSuper ? [
+              { k: 'applications', l: '📨 申请处理' },
               { k: 'users', l: '👥 用户管理' },
               { k: 'alerts', l: '🛡️ 安全告警' },
               { k: 'bans', l: '⛔ 封禁名单' },
+              { k: 'notify', l: '📢 通知群发' },
             ] : []),
-            { k: 'notify', l: '📢 通知群发' },
           ].map((t) => (
             <button key={t.k} className={`cat-tab ${tab === t.k ? 'active' : ''}`} onClick={() => setTab(t.k)}>{t.l}</button>
           ))}
@@ -376,7 +376,7 @@ export default function Admin() {
           ))
         )}
 
-        {tab === 'applications' && (
+        {isSuper && tab === 'applications' && (
           <>
             <div className="cat-tabs" style={{ paddingTop: 0 }}>
               {[{ k: 'pending', l: '⏳ 待处理' }, { k: 'approved', l: '✅ 已通过' }, { k: 'rejected', l: '❌ 已驳回' }, { k: 'all', l: '📋 全部' }].map((t) => (
@@ -512,7 +512,7 @@ export default function Admin() {
           ))
         )}
 
-        {tab === 'notify' && (
+        {isSuper && tab === 'notify' && (
           <form className="admin-post" onSubmit={sendNotify}>
             <h3 style={{ fontSize: 15, marginBottom: 10 }}>📢 发送通知</h3>
             <div className="form-group">

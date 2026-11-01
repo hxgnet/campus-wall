@@ -747,7 +747,7 @@ app.get('/api/admin/whoami', adminAuth, (req, res) => {
   res.json({ role: req.adminRole || 'admin' });
 });
 
-app.post('/api/admin/notify', adminAuth, async (req, res) => {
+app.post('/api/admin/notify', superAuth, async (req, res) => {
   const { uids, all, content } = req.body;
   if (!content || !String(content).trim()) return res.status(400).json({ error: '通知内容不能为空' });
   const text = String(content).trim();
@@ -857,7 +857,7 @@ app.delete('/api/admin/posts/:id', superAuth, async (req, res) => {
   res.json({ ok: true, message: '帖子及关联数据已删除' });
 });
 
-app.get('/api/admin/stats', adminAuth, async (req, res) => {
+app.get('/api/admin/stats', superAuth, async (req, res) => {
   const totalPosts = (await db.prepare(`SELECT COUNT(*) as c FROM posts`).get()).c;
   const approvedPosts = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE status='approved'`).get()).c;
   const pendingPosts = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE status='pending'`).get()).c;
@@ -902,7 +902,7 @@ app.put('/api/admin/reports/:id', adminAuth, async (req, res) => {
   res.json({ ok: true, reputation });
 });
 
-app.get('/api/admin/users', adminAuth, async (req, res) => {
+app.get('/api/admin/users', superAuth, async (req, res) => {
   // 刷新所有管理员设置过年级的用户标签（处理跨年后自动变为毕业生）
   try {
     const graded = await db.prepare(`SELECT id, grade FROM users WHERE grade_set_by_admin = TRUE AND grade IS NOT NULL`).all();
@@ -911,12 +911,10 @@ app.get('/api/admin/users', adminAuth, async (req, res) => {
       await db.prepare(`UPDATE users SET tag = ? WHERE id = ? AND (tag IS DISTINCT FROM ?)`).run(tag, u.id, tag);
     }
   } catch (e) { console.error('[tag-refresh] 失败:', e.message); }
-  const isSuper = req.adminRole === 'super';
-  const select = isSuper
-    ? `uid, username, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
-       grade, tag, grade_set_by_admin, latitude, longitude`
-    : `uid, username, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
-       grade, tag, grade_set_by_admin`;
+  // 超级管理员可查看用户全部个人信息
+  const select = `uid, username, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
+       grade, tag, grade_set_by_admin, latitude, longitude,
+       real_name, class_name, address, email, wechat, qq, phone, bio`;
   try {
     const users = await db.prepare(`SELECT ${select} FROM users ORDER BY id DESC`).all();
     res.json(users);
@@ -975,18 +973,17 @@ app.get('/api/applications', auth, async (req, res) => {
   res.json(list);
 });
 
-// 管理员查看所有申请
-app.get('/api/admin/applications', adminAuth, async (req, res) => {
+// 超级管理员查看所有申请（含申请人全部个人信息）
+app.get('/api/admin/applications', superAuth, async (req, res) => {
   const { status } = req.query;
-  const isSuper = req.adminRole === 'super';
   let where = '';
   const params = [];
   if (status && status !== 'all') { where = 'WHERE a.status = ?'; params.push(status); }
-  const extraCols = isSuper ? `, u.latitude, u.longitude, u.address, u.email, u.wechat, u.qq, u.phone, u.bio` : '';
   const list = await db.prepare(
     `SELECT a.id, a.content, a.images, a.status, a.admin_note, a.created_at,
             u.uid, u.nickname, u.username, u.avatar, u.real_name, u.class_name,
-            u.grade, u.tag, u.grade_set_by_admin${extraCols}
+            u.grade, u.tag, u.grade_set_by_admin,
+            u.latitude, u.longitude, u.address, u.email, u.wechat, u.qq, u.phone, u.bio
      FROM applications a JOIN users u ON u.id = a.user_id
      ${where} ORDER BY a.id DESC LIMIT 200`
   ).all(...params);
@@ -995,7 +992,7 @@ app.get('/api/admin/applications', adminAuth, async (req, res) => {
 });
 
 // 管理员更新申请状态/备注
-app.put('/api/admin/applications/:id', adminAuth, async (req, res) => {
+app.put('/api/admin/applications/:id', superAuth, async (req, res) => {
   const { status, admin_note } = req.body;
   const sets = [];
   const params = [];
@@ -1008,7 +1005,7 @@ app.put('/api/admin/applications/:id', adminAuth, async (req, res) => {
 });
 
 // 管理员修改用户资料（含年级）—— 年级由管理员设置，自动刷新毕业生标签
-app.put('/api/admin/users/:uid/profile', adminAuth, async (req, res) => {
+app.put('/api/admin/users/:uid/profile', superAuth, async (req, res) => {
   try {
   const target = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(req.params.uid);
   if (!target) return res.status(404).json({ error: '用户不存在' });
