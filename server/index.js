@@ -163,7 +163,7 @@ async function notify(userId, type, fromUser, postId, content) {
 // 同时不返回 client_ip / user_agent，避免隐私信息流向公开接口。
 const PUBLIC_POST_FIELDS = `
   p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
-  p.is_anonymous, p.is_staff, p.staff_role,
+  p.is_anonymous, p.is_staff, p.staff_role, p.is_hot,
   CASE WHEN p.is_anonymous THEN NULL ELSE u.uid END AS user_id,
   CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname,
   CASE WHEN p.is_anonymous THEN NULL ELSE u.avatar END AS avatar
@@ -376,9 +376,9 @@ app.get('/api/users/search', async (req, res) => {
   if (!q) return res.json([]);
   const list = await db.prepare(
     `SELECT uid, username, nickname, avatar FROM users
-     WHERE username ILIKE ? OR nickname ILIKE ?
+     WHERE username ILIKE ? OR nickname ILIKE ? OR uid ILIKE ?
      ORDER BY (username ILIKE ?) DESC, id DESC LIMIT 10`
-  ).all(`%${q}%`, `%${q}%`, `${q}%`);
+  ).all(`%${q}%`, `%${q}%`, `%${q}%`, `${q}%`);
   res.json(list);
 });
 
@@ -438,13 +438,15 @@ app.get('/api/posts', async (req, res) => {
   // 匿名帖不出现在任何用户主页，避免通过主页反推作者（userId 为对外 uid）
   if (userId) { where += ' AND p.user_id = (SELECT id FROM users WHERE uid = ?) AND p.is_anonymous = FALSE'; params.push(userId); }
   let orderBy = 'p.id DESC';
-  if (sort === 'hot') orderBy = '(p.likes + p.views * 0.1) DESC';
+  if (sort === 'hot') orderBy = 'p.is_hot DESC, (p.likes + p.views * 0.1) DESC';
 
   let sql;
   if (q) {
     // 使用 ILIKE，保持 SQLite LIKE 的大小写不敏感语义（中文搜索不受影响）
-    where += ' AND (p.content ILIKE ? OR p.tags ILIKE ?)';
-    params.push(`%${q}%`, `%${q}%`);
+    // 同时匹配帖子内容/标签，以及作者的用户名、昵称、UID（搜索用户即可找到其相关帖子）
+    where += ` AND (p.content ILIKE ? OR p.tags ILIKE ?
+      OR p.user_id IN (SELECT id FROM users WHERE uid ILIKE ? OR username ILIKE ? OR nickname ILIKE ?))`;
+    params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
   }
   sql = `SELECT ${PUBLIC_POST_FIELDS} FROM posts p LEFT JOIN users u ON u.id = p.user_id ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
   params.push(Number(pageSize), offset);
@@ -459,11 +461,11 @@ app.get('/api/posts', async (req, res) => {
 
 app.get('/api/posts/hot', async (req, res) => {
   const posts = await db.prepare(
-    `SELECT p.id, p.category, p.content, p.likes, p.views, p.is_anonymous, p.is_staff, p.staff_role,
+    `SELECT p.id, p.category, p.content, p.likes, p.views, p.created_at, p.is_anonymous, p.is_staff, p.staff_role, p.is_hot,
             CASE WHEN p.is_anonymous THEN NULL ELSE u.uid END AS user_id,
             CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname
      FROM posts p LEFT JOIN users u ON u.id = p.user_id
-     WHERE p.status = 'approved' ORDER BY (p.likes + p.views * 0.1) DESC LIMIT 10`
+     WHERE p.status = 'approved' ORDER BY p.is_hot DESC, (p.likes + p.views * 0.1) DESC LIMIT 10`
   ).all();
   posts.forEach(p => { p.images = []; });
   res.json(posts);
@@ -852,7 +854,7 @@ app.get('/api/admin/posts', adminAuth, async (req, res) => {
   const total = (await db.prepare(`SELECT COUNT(*) as c FROM posts p ${where}`).get(...params)).c;
   const posts = await db.prepare(
     `SELECT p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
-            p.is_anonymous, p.nickname, p.client_ip, p.user_agent, p.is_staff, p.staff_role,
+            p.is_anonymous, p.is_hot, p.nickname, p.client_ip, p.user_agent, p.is_staff, p.staff_role,
             CASE WHEN p.user_id IS NULL THEN NULL ELSE u.uid END AS user_id
      FROM posts p LEFT JOIN users u ON u.id = p.user_id
      ${where} ORDER BY p.id DESC LIMIT ? OFFSET ?`
@@ -888,9 +890,27 @@ app.get('/api/admin/posts/:id', adminAuth, async (req, res) => {
 });
 
 app.put('/api/admin/posts/:id', adminAuth, async (req, res) => {
-  const { status } = req.body;
-  if (!['approved', 'rejected', 'pending'].includes(status)) return res.status(400).json({ error: '无效状态' });
-  await db.prepare(`UPDATE posts SET status = ? WHERE id = ?`).run(status, req.params.id);
+  const { status, is_hot } = req.body || {};
+  const sets = [];
+  const params = [];
+  if (status !== undefined) {
+    if (!['approved', 'rejected', 'pending'].includes(status)) return res.status(400).json({ error: '无效状态' });
+    sets.push('status = ?');
+    params.push(status);
+  }
+  if (is_hot !== undefined) {
+    // 仅已通过的帖子可设为热门帖
+    if (is_hot === true || is_hot === 'true' || is_hot === 1) {
+      const post = await db.prepare(`SELECT status FROM posts WHERE id = ?`).get(req.params.id);
+      if (!post) return res.status(404).json({ error: '帖子不存在' });
+      if (post.status !== 'approved') return res.status(400).json({ error: '仅已通过的帖子可设为热门' });
+    }
+    sets.push('is_hot = ?');
+    params.push(is_hot === true || is_hot === 'true' || is_hot === 1);
+  }
+  if (sets.length === 0) return res.json({ ok: true });
+  params.push(req.params.id);
+  await db.prepare(`UPDATE posts SET ${sets.join(', ')} WHERE id = ?`).run(...params);
   res.json({ ok: true });
 });
 

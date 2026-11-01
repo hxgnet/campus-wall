@@ -135,6 +135,8 @@ export const api = {
     request(`/admin/posts/${id}`, { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   updatePostStatus: (id, status) =>
     request(`/admin/posts/${id}`, { method: 'PUT', body: JSON.stringify({ status }), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  setPostHot: (id, isHot) =>
+    request(`/admin/posts/${id}`, { method: 'PUT', body: JSON.stringify({ is_hot: isHot }), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   adminDeletePost: (id) =>
     request(`/admin/posts/${id}`, { method: 'DELETE', headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   getAdminStats: () => request('/admin/stats', { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),

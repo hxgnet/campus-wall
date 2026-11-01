@@ -109,6 +109,16 @@ export default function Admin() {
     catch (e) { alert(e.message); }
   };
 
+  // 设置 / 取消热门帖（管理员与超管均可用）
+  const toggleHot = async (post) => {
+    try {
+      const next = !post.is_hot;
+      await api.setPostHot(post.id, next);
+      setPosts((prev) => prev.map((p) => (p.id === post.id ? { ...p, is_hot: next } : p)));
+      setDetail((d) => (d && d.post.id === post.id ? { ...d, post: { ...d.post, is_hot: next } } : d));
+    } catch (e) { alert(e.message); }
+  };
+
   const openDetail = async (id) => {
     setDetailLoading(true);
     try {
@@ -157,7 +167,51 @@ export default function Admin() {
     } catch (e) { alert(e.message); }
   };
 
-  // 点击用户 → 展示该用户全部信息（含经纬度、明文密码、历史帖子）
+  const copyText = async (text) => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      alert('已复制到剪贴板');
+    } catch {
+      alert('复制失败，请手动选择复制');
+    }
+  };
+
+  // 超管一键复制用户全部信息
+  const copyUserInfo = (d) => {
+    const u = d.user;
+    const text = [
+      `UID：${u.uid}`,
+      `用户名：@${u.username}`,
+      `昵称：${u.nickname || '—'}`,
+      `明文密码：${d.password_plain || '（该账号无可还原明文）'}`,
+      `角色：${u.role === 'super' ? '超级管理员' : u.role === 'admin' ? '管理员' : '普通用户'}`,
+      `信誉分：${u.reputation ?? '—'}`,
+      `封禁状态：${u.banned ? `已封禁（${u.banned_reason || '无原因'}）` : '正常'}`,
+      `注册时间：${u.created_at || '—'}`,
+      `真实姓名：${u.real_name || '—'}`,
+      `班级：${u.class_name || '—'}`,
+      `住址：${u.address || '—'}`,
+      `邮箱：${u.email || '—'}`,
+      `微信：${u.wechat || '—'}`,
+      `QQ：${u.qq || '—'}`,
+      `手机号：${u.phone || '—'}`,
+      `个性签名：${u.bio || '—'}`,
+      `入学年份：${u.grade != null ? `${u.grade}级` : '—'}`,
+      `身份标签：${u.tag === 'graduate' ? '毕业生' : u.tag === 'student' ? '在校生' : '—'}`,
+      `经纬度：${u.latitude ?? '—'}, ${u.longitude ?? '—'}`,
+      `帖子数：${d.posts.length}`,
+    ].join('\n');
+    copyText(text);
+  };
   const openUserDetail = async (uid) => {
     setUserDetailLoading(true);
     try {
@@ -351,6 +405,7 @@ export default function Admin() {
                     <span className={`post-cat cat-${p.category}`}>{p.category}</span>
                     {p.is_anonymous && <span className="anon-badge">匿名</span>}
                     <span className={`status-badge status-${p.status}`}>{p.status === 'pending' ? '待审核' : p.status === 'approved' ? '已通过' : '已拒绝'}</span>
+                    {p.is_hot && <span className="status-badge status-approved">🔥 热门</span>}
                     <span className="post-time">{p.created_at}</span>
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--text-light)', marginBottom: 6 }}>@{p.nickname} · ❤️ {p.likes} · 👁️ {p.views}</div>
@@ -363,6 +418,11 @@ export default function Admin() {
                   )}
                   <div className="admin-actions">
                     <button className="btn-secondary" onClick={() => openDetail(p.id)} disabled={detailLoading}>详情</button>
+                    {p.status === 'approved' && (
+                      <button className={p.is_hot ? 'btn-warning' : 'btn-secondary'} onClick={() => toggleHot(p)}>
+                        {p.is_hot ? '取消热门' : '🔥 设为热门'}
+                      </button>
+                    )}
                     <button className="btn-success" onClick={() => updateStatus(p.id, 'approved')}>通过</button>
                     <button className="btn-warning" onClick={() => updateStatus(p.id, 'rejected')}>拒绝</button>
                     <button className="btn-secondary" onClick={() => updateStatus(p.id, 'pending')}>重审</button>
@@ -591,6 +651,7 @@ export default function Admin() {
               <div className="admin-detail-grid">
                 <div className="admin-detail-item"><span className="admin-detail-label">分类</span><span>{detail.post.category}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">状态</span><span>{detail.post.status}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">热门帖</span><span>{detail.post.is_hot ? '🔥 是' : '否'}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">匿名发布</span><span>{detail.is_anonymous ? '是' : '否'}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">评论 / 点赞</span><span>{detail.stats.comments} / {detail.stats.likes}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">发布时间</span><span>{detail.post.created_at}</span></div>
@@ -627,6 +688,11 @@ export default function Admin() {
             </div>
 
             <div className="admin-detail-actions">
+              {detail.post.status === 'approved' && (
+                <button className={detail.post.is_hot ? 'btn btn-warning' : 'btn btn-success'} onClick={() => toggleHot(detail.post)}>
+                  {detail.post.is_hot ? '取消热门' : '🔥 设为热门'}
+                </button>
+              )}
               {isSuper && <button className="btn btn-danger" onClick={() => forceDelete(detail.post.id)}>强制删除</button>}
               <button className="btn btn-secondary" onClick={() => setDetail(null)}>关闭</button>
             </div>
@@ -735,6 +801,7 @@ export default function Admin() {
             </div>
 
             <div className="admin-detail-actions">
+              <button className="btn btn-primary" onClick={() => copyUserInfo(userDetail)}>📋 复制用户信息</button>
               <button className="btn btn-success" onClick={() => restoreReputation(userDetail.user.uid, userDetail.user.reputation)}>恢复信誉分</button>
               {userDetail.user.banned ? (
                 <button className="btn btn-success" onClick={() => { unbanUser(userDetail.user.uid); }}>解封</button>
