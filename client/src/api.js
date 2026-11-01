@@ -142,6 +142,10 @@ export const api = {
   updateReport: (id, status) =>
     request(`/admin/reports/${id}`, { method: 'PUT', body: JSON.stringify({ status }), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   getUsers: () => request('/admin/users', { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  getUserDetail: (uid) =>
+    request(`/admin/users/${uid}/detail`, { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  restoreReputation: (uid, reputation = 100) =>
+    request(`/admin/users/${uid}/reputation`, { method: 'POST', body: JSON.stringify({ reputation }), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   updateUserRole: (id, role) =>
     request(`/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ role }), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
   deleteUser: (id) =>

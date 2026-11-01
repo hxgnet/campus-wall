@@ -30,7 +30,7 @@ export default function Profile() {
   });
   const [showFields, setShowFields] = useState({
     show_real_name: false, show_class_name: false, show_address: false,
-    show_email: false, show_wechat: false, show_qq: false, show_phone: false,
+    show_email: false, show_wechat: false, show_qq: false, show_phone: false, show_uid: false,
   });
   const [grade, setGrade] = useState('');
   const [gradeSetByAdmin, setGradeSetByAdmin] = useState(false);
@@ -62,6 +62,7 @@ export default function Profile() {
           show_wechat: !!me.show_wechat,
           show_qq: !!me.show_qq,
           show_phone: !!me.show_phone,
+          show_uid: !!me.show_uid,
         });
         setGrade(me.grade != null ? String(me.grade) : '');
         setGradeSetByAdmin(!!me.grade_set_by_admin);
@@ -83,9 +84,28 @@ export default function Profile() {
       else payload.grade = null;
       await api.updateProfile(payload);
       if (isMe) updateUser({ ...user, nickname, bio });
-      setProfile({ ...profile, nickname, bio, grade: grade.trim() !== '' ? Number(grade) : null });
+      setProfile({ ...profile, nickname, bio, grade: grade.trim() !== '' ? Number(grade) : null, show_uid: showFields.show_uid });
       setEditing(false);
     } catch (e) { alert(e.message); }
+  };
+
+  // 点击 ID 快速复制
+  const copyId = async (text) => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      alert(`已复制用户 ID：${text}`);
+    } catch {
+      alert(`复制失败，请手动复制：${text}`);
+    }
   };
 
   const addFriend = async () => {
@@ -142,6 +162,14 @@ export default function Profile() {
                 <p className="anon-hint" style={{ marginTop: 4, textAlign: 'left' }}>
                   可自行填写入学年份，但「毕业生」标签仅由超级管理员设置并确认，不会因入学满 3 年自动获得。
                 </p>
+                <label className="anon-toggle" style={{ marginTop: 6, fontSize: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={showFields.show_uid}
+                    onChange={(e) => setShowFields({ ...showFields, show_uid: e.target.checked })}
+                  />
+                  <span>在我的主页公开显示 ID</span>
+                </label>
               </div>
               <div className="profile-fields">
                 {PRIVATE_FIELDS.map((f) => (
@@ -177,9 +205,13 @@ export default function Profile() {
                   )}
                 </p>
               )}
-              {isMe && (
-                <p style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 4, fontFamily: 'monospace' }}>
-                  ID：{profile.uid}
+              {profile.uid && (
+                <p
+                  onClick={() => copyId(profile.uid)}
+                  title="点击复制 ID"
+                  style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 4, fontFamily: 'monospace', cursor: 'pointer', userSelect: 'none' }}
+                >
+                  ID：{profile.uid} <span style={{ fontSize: 11, color: 'var(--primary)' }}>📋 点击复制</span>
                 </p>
               )}
               <p style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 8 }}>

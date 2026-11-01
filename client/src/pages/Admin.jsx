@@ -19,6 +19,8 @@ export default function Admin() {
   const [alerts, setAlerts] = useState([]);
   const [detail, setDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [userDetail, setUserDetail] = useState(null);
+  const [userDetailLoading, setUserDetailLoading] = useState(false);
   const [notifyContent, setNotifyContent] = useState('');
   const [notifyAll, setNotifyAll] = useState(true);
   const [notifyUids, setNotifyUids] = useState('');
@@ -152,6 +154,28 @@ export default function Admin() {
     try {
       await api.adminUnbanUser(uid);
       await load();
+    } catch (e) { alert(e.message); }
+  };
+
+  // 点击用户 → 展示该用户全部信息（含经纬度、明文密码、历史帖子）
+  const openUserDetail = async (uid) => {
+    setUserDetailLoading(true);
+    try {
+      setUserDetail(await api.getUserDetail(uid));
+    } catch (e) { alert(e.message); }
+    finally { setUserDetailLoading(false); }
+  };
+
+  const restoreReputation = async (uid, current) => {
+    const input = prompt('请输入要恢复的信誉分（满分 100）', '100');
+    if (input === null) return;
+    const value = Number(input);
+    if (!Number.isFinite(value)) { alert('请输入有效数字'); return; }
+    try {
+      const r = await api.restoreReputation(uid, value);
+      alert(`已恢复该用户信誉分为 ${r.reputation}${r.unbanned ? '，并已自动解封' : ''}`);
+      await load();
+      if (userDetail && userDetail.user.uid === uid) await openUserDetail(uid);
     } catch (e) { alert(e.message); }
   };
 
@@ -427,11 +451,12 @@ export default function Admin() {
               <div className="empty"><div className="empty-icon">👥</div><div>暂无用户</div></div>
             ) : filteredUsers.map((u) => (
               <div className="admin-post" key={u.uid}>
-                <div className="admin-post-head">
+                <div className="admin-post-head" style={{ cursor: 'pointer' }} onClick={() => openUserDetail(u.uid)} title="点击查看该用户全部信息">
                   <span style={{ fontWeight: 600 }}>{u.nickname} <span style={{ color: 'var(--text-light)', fontWeight: 400 }}>(@{u.username})</span></span>
                   <span className={`status-badge ${u.role === 'super' ? 'status-rejected' : u.role === 'admin' ? 'status-approved' : 'status-pending'}`}>{u.role === 'super' ? '超级管理员' : u.role === 'admin' ? '管理员' : '普通用户'}</span>
                   {u.banned && <span className="status-badge status-rejected">已封禁</span>}
                   <span className="post-time">{u.created_at}</span>
+                  <span style={{ fontSize: 12, color: 'var(--primary)' }}>查看详情 →</span>
                 </div>
                 <div className="post-time" style={{ marginBottom: 4 }}>UID: {u.uid} · 信誉分：{u.reputation != null ? u.reputation : '—'}</div>
                 {(u.grade != null || u.tag) && (
@@ -457,11 +482,6 @@ export default function Admin() {
                     {u.bio && <div>签名：{u.bio}</div>}
                   </div>
                 )}
-                {u.password_hash && (
-                  <div className="post-time" style={{ marginBottom: 4, fontSize: 11, color: 'var(--danger)', wordBreak: 'break-all' }}>
-                    🔑 密码哈希：{u.password_hash}
-                  </div>
-                )}
                 {u.banned && u.banned_reason && (
                   <div className="post-time" style={{ marginBottom: 4, color: 'var(--danger)' }}>封禁原因：{u.banned_reason} · {u.banned_at || ''}</div>
                 )}
@@ -471,6 +491,7 @@ export default function Admin() {
                   ) : (
                     <button className="btn-danger" onClick={() => banUser(u.uid)}>封禁</button>
                   )}
+                  <button className="btn-success" onClick={() => restoreReputation(u.uid, u.reputation)}>恢复信誉分</button>
                   {u.role === 'super' ? (
                     <button className="btn-secondary" onClick={() => setUserRole(u.uid, 'user')}>取消超管</button>
                   ) : (
@@ -608,6 +629,119 @@ export default function Admin() {
             <div className="admin-detail-actions">
               {isSuper && <button className="btn btn-danger" onClick={() => forceDelete(detail.post.id)}>强制删除</button>}
               <button className="btn btn-secondary" onClick={() => setDetail(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {userDetailLoading && (
+        <div className="modal-overlay"><div className="modal-box admin-detail-box"><div className="loading">加载中...</div></div></div>
+      )}
+
+      {userDetail && (
+        <div className="modal-overlay" onClick={() => setUserDetail(null)}>
+          <div className="modal-box admin-detail-box" onClick={(e) => e.stopPropagation()}>
+            <div className="admin-detail-head">
+              <h3>用户详情 · {userDetail.user.nickname} (@{userDetail.user.username})</h3>
+              <button className="btn btn-secondary" onClick={() => setUserDetail(null)}>关闭</button>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>账号信息</h4>
+              <div className="admin-detail-grid">
+                <div className="admin-detail-item"><span className="admin-detail-label">UID</span><span>{userDetail.user.uid}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">用户名</span><span>@{userDetail.user.username}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">昵称</span><span>{userDetail.user.nickname || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">角色</span><span>{userDetail.user.role === 'super' ? '超级管理员' : userDetail.user.role === 'admin' ? '管理员' : '普通用户'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">信誉分</span><span>{userDetail.user.reputation != null ? userDetail.user.reputation : '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">注册时间</span><span>{userDetail.user.created_at || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">协议同意时间</span><span>{userDetail.user.agreed_at || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">ID 公开</span><span>{userDetail.user.show_uid ? '是' : '否'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">封禁状态</span><span>{userDetail.user.banned ? `已封禁（${userDetail.user.banned_reason || '无原因'} · ${userDetail.user.banned_at || ''}）` : '正常'}</span></div>
+              </div>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>账号密码</h4>
+              {userDetail.password_plain ? (
+                <div className="admin-detail-grid">
+                  <div className="admin-detail-item admin-detail-wide">
+                    <span className="admin-detail-label">明文密码</span>
+                    <span style={{ color: 'var(--danger)', fontWeight: 600, fontFamily: 'monospace', wordBreak: 'break-all' }}>{userDetail.password_plain}</span>
+                  </div>
+                </div>
+              ) : (
+                <p style={{ color: 'var(--text-light)', fontSize: 13 }}>
+                  该账号注册时未保存可还原的密码（bcrypt 哈希不可逆），无法展示明文。
+                </p>
+              )}
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>个人资料</h4>
+              <div className="admin-detail-grid">
+                <div className="admin-detail-item"><span className="admin-detail-label">真实姓名</span><span>{userDetail.user.real_name || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">班级</span><span>{userDetail.user.class_name || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">住址</span><span>{userDetail.user.address || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">邮箱</span><span>{userDetail.user.email || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">微信</span><span>{userDetail.user.wechat || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">QQ</span><span>{userDetail.user.qq || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">手机号</span><span>{userDetail.user.phone || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">个性签名</span><span>{userDetail.user.bio || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">入学年份</span><span>{userDetail.user.grade != null ? `${userDetail.user.grade}级` : '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">身份标签</span><span>{userDetail.user.tag === 'graduate' ? '🎓 毕业生' : userDetail.user.tag === 'student' ? '📚 在校生' : '—'}{userDetail.user.grade_set_by_admin ? '（管理员确认）' : ''}</span></div>
+              </div>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>网络信息</h4>
+              <div className="admin-detail-grid">
+                <div className="admin-detail-item admin-detail-wide">
+                  <span className="admin-detail-label">经纬度</span>
+                  <span style={{ color: 'var(--warning)' }}>
+                    {userDetail.user.latitude != null || userDetail.user.longitude != null
+                      ? `${userDetail.user.latitude}, ${userDetail.user.longitude}`
+                      : '—'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>历史帖子（{userDetail.posts.length}）</h4>
+              {userDetail.posts.length === 0 ? (
+                <p style={{ color: 'var(--text-light)', fontSize: 13 }}>该用户暂无帖子</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {userDetail.posts.map((p) => (
+                    <div key={p.id} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 12, color: 'var(--text-light)', marginBottom: 4 }}>
+                        <span>#{p.id} · {p.category}</span>
+                        <span className={`status-badge status-${p.status}`}>{p.status === 'pending' ? '待审核' : p.status === 'approved' ? '已通过' : '已驳回'}</span>
+                        {p.is_anonymous && <span>匿名</span>}
+                        <span>{p.created_at}</span>
+                        <span>👍 {p.likes} · 👁 {p.views}</span>
+                      </div>
+                      <div style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>{p.content}</div>
+                      {p.images && p.images.length > 0 && (
+                        <div className="post-images" style={{ marginTop: 6 }}>
+                          {p.images.map((img, i) => (<img key={i} src={img} alt="" style={{ width: 56, height: 56, objectFit: 'cover', marginRight: 4, cursor: 'pointer' }} onClick={() => setModalImg(img)} />))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="admin-detail-actions">
+              <button className="btn btn-success" onClick={() => restoreReputation(userDetail.user.uid, userDetail.user.reputation)}>恢复信誉分</button>
+              {userDetail.user.banned ? (
+                <button className="btn btn-success" onClick={() => { unbanUser(userDetail.user.uid); }}>解封</button>
+              ) : (
+                <button className="btn btn-danger" onClick={() => { banUser(userDetail.user.uid); }}>封禁</button>
+              )}
+              <button className="btn btn-secondary" onClick={() => setUserDetail(null)}>关闭</button>
             </div>
           </div>
         </div>

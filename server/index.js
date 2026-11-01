@@ -4,6 +4,7 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
@@ -18,6 +19,33 @@ const JWT_SECRET = config.jwtSecret;
 const ADMIN_PASSWORD = config.adminPassword;
 const SUPER_ADMIN_PASSWORD = config.superAdminPassword;
 const NOW_TEXT = `to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS')`;
+
+// ---------- 明文密码可逆加密（AES-256-GCM）----------
+// bcrypt 哈希不可逆，因此注册时额外保存一份加密后的明文，仅超级管理员可解密查看。
+// 密钥优先取 PASSWORD_ENC_KEY，未配置时由 JWT_SECRET 派生。
+const PASSWORD_ENC_KEY = crypto.createHash('sha256')
+  .update(process.env.PASSWORD_ENC_KEY || JWT_SECRET)
+  .digest();
+
+function encryptPassword(plain) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', PASSWORD_ENC_KEY, iv);
+  const enc = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString('base64')}:${tag.toString('base64')}:${enc.toString('base64')}`;
+}
+
+function decryptPassword(stored) {
+  if (!stored) return null;
+  try {
+    const [ivB64, tagB64, dataB64] = String(stored).split(':');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', PASSWORD_ENC_KEY, Buffer.from(ivB64, 'base64'));
+    decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+    return Buffer.concat([decipher.update(Buffer.from(dataB64, 'base64')), decipher.final()]).toString('utf8');
+  } catch {
+    return null;
+  }
+}
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -243,14 +271,15 @@ app.post('/api/auth/register', async (req, res) => {
   const exists = await db.prepare(`SELECT id FROM users WHERE username = ?`).get(username);
   if (exists) return res.status(400).json({ error: '用户名已被注册' });
   const hash = await bcrypt.hash(password, 10);
+  const passwordEnc = encryptPassword(password);
   const uid = genUid();
   // 经纬度仅服务端存储，永不通过任何接口返回
   const lat = latitude == null ? null : Number(latitude);
   const lng = longitude == null ? null : Number(longitude);
   const result = await db.prepare(
-    `INSERT INTO users (username, password_hash, nickname, uid, latitude, longitude, agreed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ${NOW_TEXT}) RETURNING id`
-  ).run(username, hash, nickname || username, uid, lat, lng);
+    `INSERT INTO users (username, password_hash, password_enc, nickname, uid, latitude, longitude, agreed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ${NOW_TEXT}) RETURNING id`
+  ).run(username, hash, passwordEnc, nickname || username, uid, lat, lng);
   const token = jwt.sign({ id: uid, username, nickname: nickname || username, role: 'user' }, JWT_SECRET, { expiresIn: '30d' });
   res.json({ token, user: { uid, username, nickname: nickname || username, role: 'user' } });
 });
@@ -274,7 +303,7 @@ app.get('/api/auth/me', auth, async (req, res) => {
     `SELECT uid, username, nickname, avatar, bio, role, created_at, profile_public,
             real_name, class_name, address, email, wechat, qq, phone,
             show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
-            grade, tag, grade_set_by_admin
+            grade, tag, grade_set_by_admin, show_uid
      FROM users WHERE id = ?`
   ).get(req.user.dbId);
   // 经纬度(latitude/longitude)永远不返回给任何用户，包括本人
@@ -283,7 +312,7 @@ app.get('/api/auth/me', auth, async (req, res) => {
 
 app.put('/api/auth/profile', auth, async (req, res) => {
   const fields = ['nickname', 'bio', 'avatar', 'real_name', 'class_name', 'address', 'email', 'wechat', 'qq', 'phone'];
-  const showFields = ['show_real_name', 'show_class_name', 'show_address', 'show_email', 'show_wechat', 'show_qq', 'show_phone'];
+  const showFields = ['show_real_name', 'show_class_name', 'show_address', 'show_email', 'show_wechat', 'show_qq', 'show_phone', 'show_uid'];
   const sets = [];
   const params = [];
   for (const f of fields) {
@@ -358,13 +387,13 @@ app.get('/api/users/:id', async (req, res) => {
     `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation,
             real_name, class_name, address, email, wechat, qq, phone,
             show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
-            grade, tag
+            grade, tag, show_uid
      FROM users WHERE uid = ?`
   ).get(req.params.id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
   const postCount = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE user_id = ? AND status = 'approved' AND is_anonymous = FALSE`).get(user.id)).c;
   const out = {
-    uid: user.uid, username: user.username, nickname: user.nickname, avatar: user.avatar,
+    username: user.username, nickname: user.nickname, avatar: user.avatar,
     bio: user.bio, created_at: user.created_at, profile_public: !!user.profile_public, postCount,
     grade: user.grade, tag: user.tag,
   };
@@ -373,6 +402,11 @@ app.get('/api/users/:id', async (req, res) => {
   const isSuperToken = req.headers['x-admin-token'] && req.headers['x-admin-token'] === SUPER_ADMIN_PASSWORD;
   if (isSuperToken || (viewer && (viewer.uid === user.uid || viewer.role === 'super'))) {
     out.reputation = user.reputation;
+  }
+  // 用户 ID：仅本人、超级管理员或用户主动公开时返回
+  if (isSuperToken || (viewer && viewer.uid === user.uid) || user.show_uid) {
+    out.uid = user.uid;
+    out.show_uid = !!user.show_uid;
   }
   // 单项公开开关：只有对应 show_* 为真才返回该字段
   const contactFields = ['real_name', 'class_name', 'address', 'email', 'wechat', 'qq', 'phone'];
@@ -957,6 +991,60 @@ app.get('/api/admin/users', superAuth, async (req, res) => {
     res.json(users);
   } catch (e) {
     console.error('[admin-users] error:', e.message, e.stack);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 超级管理员查看某用户完整详情：全部个人信息（含经纬度）、明文密码、该用户历史帖子
+app.get('/api/admin/users/:uid/detail', superAuth, async (req, res) => {
+  try {
+    const u = await db.prepare(
+      `SELECT id, uid, username, password_hash, password_enc, nickname, avatar, bio, role, reputation,
+              banned, banned_reason, banned_at, created_at, agreed_at, profile_public, show_uid,
+              grade, tag, grade_set_by_admin, latitude, longitude,
+              real_name, class_name, address, email, wechat, qq, phone,
+              show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone
+       FROM users WHERE uid = ?`
+    ).get(req.params.uid);
+    if (!u) return res.status(404).json({ error: '用户不存在' });
+    // 明文密码：仅注册时保存过加密明文的账号可还原（bcrypt 哈希本身不可逆）
+    const password_plain = decryptPassword(u.password_enc);
+    const posts = await db.prepare(
+      `SELECT id, category, content, tags, images, status, is_anonymous, likes, views, created_at
+       FROM posts WHERE user_id = ? ORDER BY id DESC LIMIT 200`
+    ).all(u.id);
+    posts.forEach((p) => {
+      try { p.images = p.images ? JSON.parse(p.images) : []; } catch { p.images = []; }
+      try { p.tags = p.tags ? JSON.parse(p.tags) : []; } catch { p.tags = []; }
+    });
+    const { password_enc, password_hash, ...user } = u;
+    res.json({ user, password_plain, password_recoverable: !!u.password_enc, password_hash, posts });
+  } catch (e) {
+    console.error('[admin-user-detail] error:', e.message, e.stack);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 超级管理员恢复/设置用户信誉分（默认恢复为 100 分）
+app.post('/api/admin/users/:uid/reputation', superAuth, async (req, res) => {
+  try {
+    const u = await db.prepare(`SELECT id, banned, banned_reason FROM users WHERE uid = ?`).get(req.params.uid);
+    if (!u) return res.status(404).json({ error: '用户不存在' });
+    let value = req.body && req.body.reputation !== undefined ? Number(req.body.reputation) : 100;
+    if (!Number.isFinite(value)) return res.status(400).json({ error: '信誉分无效' });
+    value = Math.max(0, Math.min(1000, Math.round(value)));
+    const sets = ['reputation = ?'];
+    const params = [value];
+    let unbanned = false;
+    // 因信誉分归零被自动封禁的账号，恢复信誉分时一并解封
+    if (value > 0 && u.banned && u.banned_reason === '信誉分归零') {
+      sets.push('banned = FALSE', 'banned_reason = NULL', 'banned_at = NULL', 'banned_info = NULL');
+      unbanned = true;
+    }
+    params.push(u.id);
+    await db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+    res.json({ ok: true, uid: req.params.uid, reputation: value, unbanned });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
