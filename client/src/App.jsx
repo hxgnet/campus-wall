@@ -12,6 +12,7 @@ import Profile from './pages/Profile.jsx';
 import Notifications from './pages/Notifications.jsx';
 import Favorites from './pages/Favorites.jsx';
 import Messages from './pages/Messages.jsx';
+import Apply from './pages/Apply.jsx';
 
 export default function App() {
   return (
@@ -28,6 +29,7 @@ export default function App() {
           <Route path="/notifications" element={<Notifications />} />
           <Route path="/messages/:uid" element={<Messages />} />
           <Route path="/favorites" element={<Favorites />} />
+          <Route path="/apply" element={<Apply />} />
           <Route path="/admin" element={<Admin />} />
         </Routes>
       </AuthProvider>

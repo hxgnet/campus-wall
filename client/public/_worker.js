@@ -1,25 +1,14 @@
-// Cloudflare Pages _worker.js：将 /api/* 和 /uploads/* 反向代理到 Netlify 函数
-// 浏览器只与 Cloudflare 通信（国内可访问），由 Worker 服务端请求 Netlify
+// Cloudflare Pages _worker.js：将 /api/* 和 /uploads/* 反向代理到 Cloudflare Worker 后端
+// 浏览器只与 Cloudflare 通信（国内可访问），由 Pages Worker 服务端请求后端 Worker
+const BACKEND = 'https://campus-wall-api.hxgnet.workers.dev';
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // 代理 API 与上传资源到 Netlify Function
     if (path.startsWith('/api') || path.startsWith('/uploads')) {
-      let targetPath;
-      if (path.startsWith('/api')) {
-        // /api/posts -> /posts  (Netlify 函数内部会再补回 /api 前缀)
-        targetPath = path.replace(/^\/api/, '') || '/';
-      } else {
-        // /uploads/xxx 保持不变
-        targetPath = path;
-      }
-      const targetUrl =
-        'https://psxyq.netlify.app/.netlify/functions/api' +
-        targetPath +
-        url.search;
-
+      const targetUrl = BACKEND + path + url.search;
       const proxyReq = new Request(targetUrl, request);
       const res = await fetch(proxyReq);
 

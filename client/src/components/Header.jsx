@@ -48,6 +48,7 @@ export default function Header() {
           <NavLink to="/create">发帖</NavLink>
           {user ? (
             <>
+              <NavLink to="/apply">申请</NavLink>
               <NavLink to="/notifications" className="notif-badge" data-count={unread > 0 ? unread : ''}>通知</NavLink>
               <NavLink to="/favorites">收藏</NavLink>
               <NavLink to={`/profile/${user.uid}`}>{user.nickname}</NavLink>

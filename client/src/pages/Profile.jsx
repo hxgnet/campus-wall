@@ -147,6 +147,13 @@ export default function Profile() {
             <div>
               <h2 style={{ margin: '8px 0 4px' }}>{profile.nickname}</h2>
               {profile.bio && <p style={{ color: 'var(--text-light)', fontSize: 14 }}>{profile.bio}</p>}
+              {(profile.grade != null || profile.tag) && (
+                <p style={{ fontSize: 14, color: 'var(--primary)', margin: '4px 0' }}>
+                  {profile.grade != null && `${profile.grade}级`}
+                  {profile.grade != null && profile.tag && ' · '}
+                  {profile.tag === 'graduate' ? '🎓 毕业生' : profile.tag === 'student' ? '📚 在校生' : ''}
+                </p>
+              )}
               <p style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 8 }}>
                 帖子 {posts.length}
                 {profile.reputation !== undefined && <> · 信誉分 {profile.reputation}</>}

@@ -95,6 +95,25 @@ export const api = {
     }).then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.error); return d; });
   },
 
+  // Applications
+  submitApplication: (content, images) => {
+    const fd = new FormData();
+    fd.append('content', content);
+    for (const f of images) fd.append('images', f);
+    return fetch(BASE + '/applications', {
+      method: 'POST',
+      body: fd,
+      headers: getToken() ? { Authorization: `Bearer ${getToken()}` } : {},
+    }).then(async (r) => { const d = await r.json(); if (!r.ok) throw new Error(d.error); return d; });
+  },
+  getMyApplications: () => request('/applications'),
+  getAdminApplications: (status = 'all') =>
+    request(`/admin/applications?status=${status}`, { headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  updateApplication: (id, data) =>
+    request(`/admin/applications/${id}`, { method: 'PUT', body: JSON.stringify(data), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+  adminUpdateUserProfile: (uid, data) =>
+    request(`/admin/users/${uid}/profile`, { method: 'PUT', body: JSON.stringify(data), headers: { 'x-admin-token': localStorage.getItem('admin_token') } }),
+
   // Admin
   adminLogin: (password) => {
     localStorage.setItem('admin_token', password);

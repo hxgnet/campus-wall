@@ -1,6 +1,6 @@
 // 通用文件存储适配器
 // 优先级：Supabase Storage > 本地磁盘
-// 调用方只需 saveFile(localPath, key)，返回可访问的 URL
+// 调用方只需 saveFile(file, key)，file 为 multer 文件对象（含 buffer/originalname/mimetype）
 const path = require('path');
 const fs = require('fs');
 const config = require('../config');
@@ -13,11 +13,24 @@ const MIME = {
   '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
   '.svg': 'image/svg+xml',
 };
-function contentType(filePath) {
-  return MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
+function contentType(file) {
+  if (file && file.mimetype) return file.mimetype;
+  if (file && file.originalname) return MIME[path.extname(file.originalname).toLowerCase()] || 'application/octet-stream';
+  return 'application/octet-stream';
+}
+function fileBuffer(file) {
+  if (file && file.buffer) return file.buffer;
+  // 兼容传入路径的情况（旧调用）
+  if (typeof file === 'string') return fs.readFileSync(file);
+  return file;
+}
+function fileName(file) {
+  if (file && file.originalname) return file.originalname;
+  if (typeof file === 'string') return path.basename(file);
+  return 'file';
 }
 
-async function uploadSupabase(localPath, key) {
+async function uploadSupabase(file, key) {
   const base = config.supabase.url.replace(/\/+$/, '');
   const objectPath = key.split('/').map(encodeURIComponent).join('/');
   const res = await fetch(`${base}/storage/v1/object/${config.supabase.bucket}/${objectPath}`, {
@@ -25,10 +38,10 @@ async function uploadSupabase(localPath, key) {
     headers: {
       apikey: config.supabase.serviceKey,
       Authorization: `Bearer ${config.supabase.serviceKey}`,
-      'Content-Type': contentType(localPath),
+      'Content-Type': contentType(file),
       'x-upsert': 'true',
     },
-    body: fs.readFileSync(localPath),
+    body: fileBuffer(file),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -38,18 +51,21 @@ async function uploadSupabase(localPath, key) {
 }
 
 /**
- * 保存上传的临时文件
- * @param {string} localPath multer 生成的本机绝对路径
+ * 保存上传的文件
+ * @param {object} file multer 文件对象（含 buffer/originalname/mimetype）或本地路径字符串
  * @param {string} key 对象键，如 posts/xxx.jpg
  * @returns {Promise<string>} 可访问 URL（云端）或 /uploads/xxx（本地）
  */
-async function saveFile(localPath, key) {
+async function saveFile(file, key) {
   if (provider === 'supabase') {
-    const url = await uploadSupabase(localPath, key);
-    if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
-    return url;
+    return await uploadSupabase(file, key);
   }
-  return '/uploads/' + path.basename(localPath);
+  // 本地存储：写入 uploads 目录
+  const buf = fileBuffer(file);
+  const filename = path.basename(key);
+  const target = path.join(config.uploadsDir || '/tmp/uploads', filename);
+  fs.writeFileSync(target, buf);
+  return '/uploads/' + filename;
 }
 
 /**

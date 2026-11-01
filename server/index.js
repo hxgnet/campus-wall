@@ -55,13 +55,8 @@ try {
 }
 app.use('/uploads', express.static(uploadsDir));
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    cb(null, Date.now() + '-' + Math.round(Math.random() * 1e9) + ext);
-  },
-});
+// 使用内存存储（兼容 Cloudflare Workers 等无文件系统的运行时）
+const storage = multer.memoryStorage();
 const upload = multer({
   storage,
   limits: { fileSize: 4 * 1024 * 1024 },
@@ -189,6 +184,25 @@ async function penalizeAndMaybeBan(userId, points) {
 
 const normText = (v) => String(v == null ? '' : v).replace(/\s+/g, '').toLowerCase();
 
+// 根据年级（入学年份）自动判定标签：
+// 本年 - 年级 > 3 且本年已过 9 月 1 日 → 毕业生(graduate)，否则在校生(student)
+// 仅对管理员设置的年级生效（grade_set_by_admin = TRUE）
+function computeGraduateTag(grade) {
+  if (grade == null) return null;
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const pastSept1 = now.getMonth() > 8 || (now.getMonth() === 8 && now.getDate() >= 1);
+  if (currentYear - Number(grade) > 3 && pastSept1) return 'graduate';
+  return 'student';
+}
+
+async function refreshUserTag(userId) {
+  const u = await db.prepare(`SELECT grade, grade_set_by_admin FROM users WHERE id = ?`).get(userId);
+  if (!u || !u.grade_set_by_admin || u.grade == null) return;
+  const tag = computeGraduateTag(u.grade);
+  await db.prepare(`UPDATE users SET tag = ? WHERE id = ?`).run(tag, userId);
+}
+
 // 资料保存后检测是否命中已封禁用户的资料（用于识别小号）
 async function findBanHit(userId) {
   const me = await db.prepare(
@@ -258,7 +272,8 @@ app.get('/api/auth/me', auth, async (req, res) => {
   const user = await db.prepare(
     `SELECT uid, username, nickname, avatar, bio, role, created_at, profile_public,
             real_name, class_name, address, email, wechat, qq, phone,
-            show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone
+            show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
+            grade, tag
      FROM users WHERE id = ?`
   ).get(req.user.dbId);
   // 经纬度(latitude/longitude)永远不返回给任何用户，包括本人
@@ -320,7 +335,8 @@ app.get('/api/users/:id', async (req, res) => {
   const user = await db.prepare(
     `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation,
             real_name, class_name, address, email, wechat, qq, phone,
-            show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone
+            show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
+            grade, tag
      FROM users WHERE uid = ?`
   ).get(req.params.id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
@@ -328,6 +344,7 @@ app.get('/api/users/:id', async (req, res) => {
   const out = {
     uid: user.uid, username: user.username, nickname: user.nickname, avatar: user.avatar,
     bio: user.bio, created_at: user.created_at, profile_public: !!user.profile_public, postCount,
+    grade: user.grade, tag: user.tag,
   };
   // 信誉分仅对本人与超级管理员可见
   const viewer = await getCurrentUser(req);
@@ -433,7 +450,7 @@ app.post('/api/posts', auth, upload.array('images', 9), async (req, res) => {
   let images = [];
   try {
     for (const f of req.files || []) {
-      images.push(await fileStorage.saveFile(f.path, `posts/${Date.now()}-${f.filename}`));
+      images.push(await fileStorage.saveFile(f, `posts/${Date.now()}-${f.originalname}`));
     }
   } catch (e) {
     console.error('图片上传失败:', e.message);
@@ -600,7 +617,7 @@ app.post('/api/upload/avatar', auth, upload.single('avatar'), async (req, res) =
   if (!req.file) return res.status(400).json({ error: '请上传图片' });
   let url;
   try {
-    url = await fileStorage.saveFile(req.file.path, `avatars/${Date.now()}-${req.file.filename}`);
+    url = await fileStorage.saveFile(req.file, `avatars/${Date.now()}-${req.file.originalname}`);
   } catch (e) {
     console.error('头像上传失败:', e.message);
     return res.status(500).json({ error: '头像上传失败' });
@@ -886,11 +903,27 @@ app.put('/api/admin/reports/:id', adminAuth, async (req, res) => {
 });
 
 app.get('/api/admin/users', adminAuth, async (req, res) => {
-  const users = await db.prepare(
-    `SELECT uid, username, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at
-     FROM users ORDER BY id DESC`
-  ).all();
-  res.json(users);
+  // 刷新所有管理员设置过年级的用户标签（处理跨年后自动变为毕业生）
+  try {
+    const graded = await db.prepare(`SELECT id, grade FROM users WHERE grade_set_by_admin = TRUE AND grade IS NOT NULL`).all();
+    for (const u of graded) {
+      const tag = computeGraduateTag(u.grade);
+      await db.prepare(`UPDATE users SET tag = ? WHERE id = ? AND (tag IS DISTINCT FROM ?)`).run(tag, u.id, tag);
+    }
+  } catch (e) { console.error('[tag-refresh] 失败:', e.message); }
+  const isSuper = req.adminRole === 'super';
+  const select = isSuper
+    ? `uid, username, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
+       grade, tag, grade_set_by_admin, latitude, longitude`
+    : `uid, username, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
+       grade, tag, grade_set_by_admin`;
+  try {
+    const users = await db.prepare(`SELECT ${select} FROM users ORDER BY id DESC`).all();
+    res.json(users);
+  } catch (e) {
+    console.error('[admin-users] error:', e.message, e.stack);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.put('/api/admin/users/:id', superAuth, async (req, res) => {
@@ -903,6 +936,107 @@ app.put('/api/admin/users/:id', superAuth, async (req, res) => {
 app.delete('/api/admin/users/:id', superAuth, async (req, res) => {
   await db.prepare(`DELETE FROM users WHERE uid = ?`).run(req.params.id);
   res.json({ ok: true });
+});
+
+// ---------- 用户申请（图文）----------
+// 用户提交申请（带图片）
+app.post('/api/applications', auth, upload.array('images', 9), async (req, res) => {
+  const { content } = req.body;
+  if (!content || !content.trim()) return res.status(400).json({ error: '申请内容不能为空' });
+  if (content.length > 2000) return res.status(400).json({ error: '内容不能超过2000字' });
+  let images = [];
+  try {
+    for (const f of req.files || []) {
+      images.push(await fileStorage.saveFile(f, `applications/${Date.now()}-${f.originalname}`));
+    }
+  } catch (e) {
+    console.error('申请图片上传失败:', e.message);
+  }
+  const result = await db.prepare(
+    `INSERT INTO applications (user_id, content, images) VALUES (?, ?, ?) RETURNING id`
+  ).run(req.user.dbId, content.trim(), JSON.stringify(images));
+  res.json({ id: result.lastInsertRowid, message: '申请已提交，管理员会尽快处理' });
+});
+
+// 用户查看自己的申请
+app.get('/api/applications', auth, async (req, res) => {
+  const list = await db.prepare(
+    `SELECT id, content, images, status, admin_note, created_at FROM applications WHERE user_id = ? ORDER BY id DESC`
+  ).all(req.user.dbId);
+  list.forEach((a) => { a.images = a.images ? JSON.parse(a.images) : []; });
+  res.json(list);
+});
+
+// 管理员查看所有申请
+app.get('/api/admin/applications', adminAuth, async (req, res) => {
+  const { status } = req.query;
+  const isSuper = req.adminRole === 'super';
+  let where = '';
+  const params = [];
+  if (status && status !== 'all') { where = 'WHERE a.status = ?'; params.push(status); }
+  const extraCols = isSuper ? `, u.latitude, u.longitude, u.address, u.email, u.wechat, u.qq, u.phone, u.bio` : '';
+  const list = await db.prepare(
+    `SELECT a.id, a.content, a.images, a.status, a.admin_note, a.created_at,
+            u.uid, u.nickname, u.username, u.avatar, u.real_name, u.class_name,
+            u.grade, u.tag, u.grade_set_by_admin${extraCols}
+     FROM applications a JOIN users u ON u.id = a.user_id
+     ${where} ORDER BY a.id DESC LIMIT 200`
+  ).all(...params);
+  list.forEach((a) => { a.images = a.images ? JSON.parse(a.images) : []; });
+  res.json(list);
+});
+
+// 管理员更新申请状态/备注
+app.put('/api/admin/applications/:id', adminAuth, async (req, res) => {
+  const { status, admin_note } = req.body;
+  const sets = [];
+  const params = [];
+  if (status) { sets.push('status = ?'); params.push(status); }
+  if (admin_note !== undefined) { sets.push('admin_note = ?'); params.push(String(admin_note || '')); }
+  if (sets.length === 0) return res.json({ ok: true });
+  params.push(req.params.id);
+  await db.prepare(`UPDATE applications SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  res.json({ ok: true });
+});
+
+// 管理员修改用户资料（含年级）—— 年级由管理员设置，自动刷新毕业生标签
+app.put('/api/admin/users/:uid/profile', adminAuth, async (req, res) => {
+  try {
+  const target = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(req.params.uid);
+  if (!target) return res.status(404).json({ error: '用户不存在' });
+  const fields = ['nickname', 'real_name', 'class_name', 'address', 'email', 'wechat', 'qq', 'phone', 'bio'];
+  const sets = [];
+  const params = [];
+  for (const f of fields) {
+    if (req.body[f] !== undefined) {
+      sets.push(`${f} = ?`);
+      params.push(req.body[f] === null ? '' : String(req.body[f]));
+    }
+  }
+  // 年级由管理员设置
+  if (req.body.grade !== undefined) {
+    const g = req.body.grade === '' || req.body.grade == null ? null : Number(req.body.grade);
+    sets.push('grade = ?');
+    params.push(g);
+    sets.push('grade_set_by_admin = ?');
+    params.push(g != null);
+  }
+  // 标签可由管理员手动设置
+  if (req.body.tag !== undefined) {
+    const t = ['graduate', 'student', null, ''].includes(req.body.tag) ? req.body.tag || null : null;
+    sets.push('tag = ?');
+    params.push(t);
+  }
+  if (sets.length === 0) return res.json({ ok: true });
+  params.push(target.id);
+  await db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  // 若年级由管理员设置，自动刷新标签
+  if (req.body.grade !== undefined) await refreshUserTag(target.id);
+  res.json({ ok: true });
+  } catch (e) {
+    console.error('[admin-profile-update] error:', e.message, e.stack);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ---------- Super Admin: 封禁 / 告警 / 私信 ----------
@@ -1006,6 +1140,16 @@ app.get('/api/admin/messages/:uid', superAuth, async (req, res) => {
 // ---------- Health check ----------
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
+});
+
+// ---------- 全局错误处理（必须在所有路由之后）----------
+// Express 5 会自动捕获 async 路由抛出的错误并交给此中间件，
+// 避免未处理异常导致 Workers 返回 Cloudflare 默认错误页。
+app.use((err, req, res, next) => {
+  const msg = err && err.message ? err.message : String(err);
+  console.error('[unhandled-error]', req.method, req.url, msg, err && err.stack);
+  if (res.headersSent) return next(err);
+  res.status(err.status || 500).json({ error: msg });
 });
 
 // ---------- Serve frontend ----------

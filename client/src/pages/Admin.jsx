@@ -29,6 +29,16 @@ export default function Admin() {
   const [msgPeer, setMsgPeer] = useState(null);
   const [msgList, setMsgList] = useState([]);
   const [msgLoading, setMsgLoading] = useState(false);
+  // 申请处理
+  const [applications, setApplications] = useState([]);
+  const [appFilter, setAppFilter] = useState('pending');
+  const [appLoading, setAppLoading] = useState(false);
+  const [editingApp, setEditingApp] = useState(null); // 当前正在编辑资料的申请
+  const [editForm, setEditForm] = useState({});
+  const [editGrade, setEditGrade] = useState('');
+  const [editTag, setEditTag] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+  const [appNote, setAppNote] = useState('');
 
   const load = async () => {
     if (tab === 'posts') {
@@ -49,6 +59,10 @@ export default function Admin() {
       try { setAlerts(await api.adminAlerts()); } catch (e) { alert(e.message); }
     } else if (tab === 'bans') {
       try { setBans(await api.adminBans()); } catch (e) { alert(e.message); }
+    } else if (tab === 'applications') {
+      setAppLoading(true);
+      try { setApplications(await api.getAdminApplications(appFilter)); } catch (e) { alert(e.message); }
+      finally { setAppLoading(false); }
     }
   };
 
@@ -68,7 +82,7 @@ export default function Admin() {
       load();
       api.getAdminStats().then(setStats).catch(() => {});
     }
-  }, [loggedIn, filter, tab]);
+  }, [loggedIn, filter, tab, appFilter]);
 
   const login = async (e) => {
     e.preventDefault();
@@ -188,6 +202,53 @@ export default function Admin() {
     catch (e) { alert(e.message); }
   };
 
+  // 打开申请者资料编辑
+  const openEditApplicant = (app) => {
+    setEditingApp(app);
+    setEditForm({
+      nickname: app.nickname || '',
+      real_name: app.real_name || '',
+      class_name: app.class_name || '',
+      address: app.address || '',
+      email: app.email || '',
+      wechat: app.wechat || '',
+      qq: app.qq || '',
+      phone: app.phone || '',
+      bio: app.bio || '',
+    });
+    setEditGrade(app.grade != null ? String(app.grade) : '');
+    setEditTag(app.tag || '');
+    setAppNote(app.admin_note || '');
+  };
+
+  const saveApplicantProfile = async () => {
+    if (!editingApp) return;
+    setEditSaving(true);
+    try {
+      const payload = { ...editForm };
+      if (editGrade.trim() !== '') payload.grade = Number(editGrade);
+      else payload.grade = null;
+      if (editTag) payload.tag = editTag;
+      await api.adminUpdateUserProfile(editingApp.uid, payload);
+      alert('资料已更新');
+      // 刷新列表
+      const list = await api.getAdminApplications(appFilter);
+      setApplications(list);
+      const updated = list.find((a) => a.id === editingApp.id);
+      if (updated) setEditingApp(updated);
+    } catch (e) { alert(e.message); }
+    finally { setEditSaving(false); }
+  };
+
+  const processApplication = async (app, status) => {
+    try {
+      await api.updateApplication(app.id, { status, admin_note: appNote });
+      alert(status === 'approved' ? '已通过申请' : '已驳回申请');
+      setEditingApp(null);
+      load();
+    } catch (e) { alert(e.message); }
+  };
+
   const userQuery = userSearch.trim().toLowerCase();
   const filteredUsers = userQuery
     ? users.filter((u) =>
@@ -237,6 +298,7 @@ export default function Admin() {
         <div className="cat-tabs" style={{ paddingTop: 0 }}>
           {[
             { k: 'posts', l: '📝 帖子审核' },
+            { k: 'applications', l: '📨 申请处理' },
             { k: 'reports', l: '🚩 举报处理' },
             ...(isSuper ? [
               { k: 'users', l: '👥 用户管理' },
@@ -314,6 +376,48 @@ export default function Admin() {
           ))
         )}
 
+        {tab === 'applications' && (
+          <>
+            <div className="cat-tabs" style={{ paddingTop: 0 }}>
+              {[{ k: 'pending', l: '⏳ 待处理' }, { k: 'approved', l: '✅ 已通过' }, { k: 'rejected', l: '❌ 已驳回' }, { k: 'all', l: '📋 全部' }].map((t) => (
+                <button key={t.k} className={`cat-tab ${appFilter === t.k ? 'active' : ''}`} onClick={() => setAppFilter(t.k)}>{t.l}</button>
+              ))}
+            </div>
+            {appLoading ? <div className="loading">加载中...</div> :
+              applications.length === 0 ? (
+                <div className="empty"><div className="empty-icon">📨</div><div>暂无申请</div></div>
+              ) : applications.map((a) => (
+                <div className="admin-post" key={a.id}>
+                  <div className="admin-post-head">
+                    <span style={{ fontWeight: 600 }}>{a.nickname} <span style={{ color: 'var(--text-light)', fontWeight: 400 }}>(@{a.username})</span></span>
+                    <span className={`status-badge status-${a.status}`}>{a.status === 'pending' ? '待处理' : a.status === 'approved' ? '已通过' : '已驳回'}</span>
+                    <span className="post-time">{a.created_at}</span>
+                  </div>
+                  <div className="post-time" style={{ marginBottom: 6 }}>
+                    UID: {a.uid}
+                    {a.real_name && ` · 姓名：${a.real_name}`}
+                    {a.class_name && ` · 班级：${a.class_name}`}
+                    {a.grade != null && ` · ${a.grade}级`}
+                    {a.tag && ` · ${a.tag === 'graduate' ? '🎓 毕业生' : '📚 在校生'}`}
+                  </div>
+                  <div className="post-content" style={{ whiteSpace: 'pre-wrap' }}>{a.content}</div>
+                  {a.images && a.images.length > 0 && (
+                    <div className="post-images" style={{ marginTop: 8 }}>
+                      {a.images.map((img, i) => (<img key={i} src={img} alt="" style={{ cursor: 'pointer' }} onClick={() => setModalImg(img)} />))}
+                    </div>
+                  )}
+                  {a.admin_note && (
+                    <div style={{ marginTop: 8, fontSize: 13, color: 'var(--text-light)' }}><strong>管理员备注：</strong>{a.admin_note}</div>
+                  )}
+                  <div className="admin-actions">
+                    <button className="btn-primary" onClick={() => openEditApplicant(a)}>处理申请</button>
+                  </div>
+                </div>
+              ))
+            }
+          </>
+        )}
+
         {tab === 'users' && isSuper && (
           <>
             <div className="form-group">
@@ -330,6 +434,17 @@ export default function Admin() {
                   <span className="post-time">{u.created_at}</span>
                 </div>
                 <div className="post-time" style={{ marginBottom: 4 }}>UID: {u.uid} · 信誉分：{u.reputation != null ? u.reputation : '—'}</div>
+                {(u.grade != null || u.tag) && (
+                  <div className="post-time" style={{ marginBottom: 4 }}>
+                    {u.grade != null && `${u.grade}级`}
+                    {u.grade != null && u.tag && ' · '}
+                    {u.tag === 'graduate' ? '🎓 毕业生' : u.tag === 'student' ? '📚 在校生' : ''}
+                    {u.grade_set_by_admin && ' · 年级已由管理员设置'}
+                  </div>
+                )}
+                {isSuper && (u.latitude != null || u.longitude != null) && (
+                  <div className="post-time" style={{ marginBottom: 4, color: 'var(--warning)' }}>📍 经纬度：{u.latitude}, {u.longitude}</div>
+                )}
                 {u.banned && u.banned_reason && (
                   <div className="post-time" style={{ marginBottom: 4, color: 'var(--danger)' }}>封禁原因：{u.banned_reason} · {u.banned_at || ''}</div>
                 )}
@@ -476,6 +591,95 @@ export default function Admin() {
             <div className="admin-detail-actions">
               {isSuper && <button className="btn btn-danger" onClick={() => forceDelete(detail.post.id)}>强制删除</button>}
               <button className="btn btn-secondary" onClick={() => setDetail(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editingApp && (
+        <div className="modal-overlay" onClick={() => setEditingApp(null)}>
+          <div className="modal-box admin-detail-box" onClick={(e) => e.stopPropagation()}>
+            <div className="admin-detail-head">
+              <h3>处理申请 · {editingApp.nickname} (@{editingApp.username})</h3>
+              <button className="btn btn-secondary" onClick={() => setEditingApp(null)}>关闭</button>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>申请内容</h4>
+              <div className="admin-detail-content" style={{ whiteSpace: 'pre-wrap' }}>{editingApp.content}</div>
+              {editingApp.images && editingApp.images.length > 0 && (
+                <div className="post-images" style={{ marginTop: 8 }}>
+                  {editingApp.images.map((img, i) => (<img key={i} src={img} alt="" style={{ cursor: 'pointer' }} onClick={() => setModalImg(img)} />))}
+                </div>
+              )}
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>申请者资料（可修改）</h4>
+              <div className="admin-detail-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                {[
+                  { k: 'nickname', l: '昵称' },
+                  { k: 'real_name', l: '真实姓名' },
+                  { k: 'class_name', l: '班级' },
+                  { k: 'address', l: '住址' },
+                  { k: 'email', l: '邮箱' },
+                  { k: 'wechat', l: '微信' },
+                  { k: 'qq', l: 'QQ' },
+                  { k: 'phone', l: '手机号' },
+                ].map((f) => (
+                  <div className="form-group" key={f.k} style={{ margin: '4px 0' }}>
+                    <label style={{ fontSize: 12, color: 'var(--text-light)' }}>{f.l}</label>
+                    <input className="form-input" style={{ fontSize: 13 }} value={editForm[f.k] || ''} onChange={(e) => setEditForm((p) => ({ ...p, [f.k]: e.target.value }))} />
+                  </div>
+                ))}
+                <div className="form-group" style={{ gridColumn: '1 / -1', margin: '4px 0' }}>
+                  <label style={{ fontSize: 12, color: 'var(--text-light)' }}>个人简介</label>
+                  <textarea className="form-textarea" style={{ fontSize: 13 }} rows={2} value={editForm.bio || ''} onChange={(e) => setEditForm((p) => ({ ...p, bio: e.target.value }))} />
+                </div>
+              </div>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>年级与身份标签</h4>
+              <div className="admin-detail-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                <div className="form-group" style={{ margin: '4px 0' }}>
+                  <label style={{ fontSize: 12, color: 'var(--text-light)' }}>入学年份（如 2022）</label>
+                  <input className="form-input" style={{ fontSize: 13 }} type="number" value={editGrade} onChange={(e) => setEditGrade(e.target.value)} placeholder="留空则清除" />
+                </div>
+                <div className="form-group" style={{ margin: '4px 0' }}>
+                  <label style={{ fontSize: 12, color: 'var(--text-light)' }}>身份标签（手动设置）</label>
+                  <select className="form-input" style={{ fontSize: 13 }} value={editTag} onChange={(e) => setEditTag(e.target.value)}>
+                    <option value="">（由年级自动判定）</option>
+                    <option value="student">📚 在校生</option>
+                    <option value="graduate">🎓 毕业生</option>
+                  </select>
+                </div>
+              </div>
+              <p style={{ fontSize: 12, color: 'var(--text-light)', margin: '6px 0 0' }}>
+                {editingApp.grade_set_by_admin ? '✓ 年级由管理员设置，每年9月1日后若超过3年将自动标记为毕业生' : '年级尚未由管理员设置'}
+              </p>
+            </div>
+
+            {isSuper && (editingApp.latitude != null || editingApp.longitude != null) && (
+              <div className="admin-detail-section">
+                <h4>📍 经纬度（仅超级管理员可见）</h4>
+                <div className="admin-detail-grid">
+                  <div className="admin-detail-item"><span className="admin-detail-label">纬度</span><span>{editingApp.latitude}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">经度</span><span>{editingApp.longitude}</span></div>
+                </div>
+              </div>
+            )}
+
+            <div className="admin-detail-section">
+              <h4>审核备注</h4>
+              <textarea className="form-textarea" rows={2} placeholder="可填写处理意见（用户可见）" value={appNote} onChange={(e) => setAppNote(e.target.value)} />
+            </div>
+
+            <div className="admin-detail-actions">
+              <button className="btn btn-primary" onClick={saveApplicantProfile} disabled={editSaving}>{editSaving ? '保存中...' : '保存资料修改'}</button>
+              <button className="btn btn-success" onClick={() => processApplication(editingApp, 'approved')}>通过申请</button>
+              <button className="btn btn-warning" onClick={() => processApplication(editingApp, 'rejected')}>驳回申请</button>
+              <button className="btn btn-secondary" onClick={() => setEditingApp(null)}>关闭</button>
             </div>
           </div>
         </div>
