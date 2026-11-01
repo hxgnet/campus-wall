@@ -57,6 +57,14 @@ pool.on('error', (err) => {
   // 空闲连接异常时不能静默，否则线上会表现为所有查询挂起
   console.error('[db] 连接池空闲连接错误:', err.message);
 });
+// 为每个新建的连接绑定 error 监听，避免未处理的连接错误导致 Worker 崩溃（1101）
+if (!DB_CONFIG_MISSING) {
+  pool.on('connect', (client) => {
+    client.on('error', (err) => {
+      console.error('[db] 连接错误:', err && err.message ? err.message : err);
+    });
+  });
+}
 
 const LOCAL_NOW = `to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS')`;
 
