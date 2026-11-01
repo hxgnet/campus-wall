@@ -32,6 +32,13 @@ export default function App() {
           <Route path="/apply" element={<Apply />} />
           <Route path="/admin" element={<Admin />} />
         </Routes>
+        <footer className="site-footer">
+          <div className="footer-brand">鹏山校园墙 · PENGSHAN CAMPUS WALL</div>
+          <div className="footer-line" />
+          <div className="footer-slogan">以青春之我，建青春之鹏山</div>
+          <div className="footer-meta">石狮市鹏山实验学校 · 灵秀片区九年一贯制实验学校</div>
+          <div className="footer-copy">弘扬大鹏精神：志趣高远 · 精神豪迈 · 追求自由 · 超越自我</div>
+        </footer>
       </AuthProvider>
     </ThemeProvider>
   );

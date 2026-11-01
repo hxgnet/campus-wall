@@ -32,6 +32,18 @@ export default function Feed() {
   return (
     <div className="page">
       <div className="container">
+        <div className="hero-card">
+          <div className="hero-kicker">SHISHI PENGSHAN EXPERIMENTAL SCHOOL</div>
+          <div className="hero-title">鹏山校园墙</div>
+          <div className="hero-slogan">以青春之我，建青春之鹏山 · 今天，校园由你发声</div>
+          <div className="hero-chips">
+            <span className="hero-chip">志趣高远</span>
+            <span className="hero-chip">精神豪迈</span>
+            <span className="hero-chip">追求自由</span>
+            <span className="hero-chip">超越自我</span>
+          </div>
+        </div>
+
         <div className="feed-toolbar">
           <div className="search-bar search-trigger" onClick={() => navigate('/search')}>
             <input placeholder="搜索帖子内容或标签..." readOnly />

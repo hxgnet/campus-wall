@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext.jsx';
+import BrandMark from '../components/BrandMark.jsx';
 
-const AGREEMENT_TEXT = `《校园墙用户协议》
+const AGREEMENT_TEXT = `《鹏山校园墙用户协议》
 
 1. 本平台仅供校园内交流使用，禁止发布违法、违规、色情、暴力、诈骗等内容。
 2. 禁止人身攻击、骚扰、歧视、泄露他人隐私等行为。
@@ -56,7 +57,13 @@ export default function Login() {
 
   return (
     <div className="page">
-      <div className="container" style={{ maxWidth: 380, marginTop: 40 }}>
+      <div className="container" style={{ maxWidth: 380, marginTop: 28 }}>
+        <div className="hero-card" style={{ marginTop: 0 }}>
+          <div style={{ marginBottom: 12 }}><BrandMark size={54} /></div>
+          <div className="hero-kicker">石狮市鹏山实验学校</div>
+          <div className="hero-title">鹏山校园墙</div>
+          <div className="hero-slogan" style={{ marginBottom: 0 }}>以青春之我，建青春之鹏山</div>
+        </div>
         <div className="detail-card">
           <h2 style={{ textAlign: 'center', marginBottom: 20 }}>{mode === 'login' ? '🔐 登录' : '📝 注册'}</h2>
           <div className="cat-tabs" style={{ justifyContent: 'center', marginBottom: 16 }}>
