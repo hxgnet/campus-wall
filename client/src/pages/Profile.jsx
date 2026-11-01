@@ -205,15 +205,20 @@ export default function Profile() {
             <div>
               <h2 style={{ margin: '8px 0 4px' }}>{profile.nickname}</h2>
               {profile.bio && <p style={{ color: 'var(--text-light)', fontSize: 14 }}>{profile.bio}</p>}
-              {(profile.grade != null || profile.tag) && (
-                <p style={{ fontSize: 14, color: 'var(--primary)', margin: '4px 0' }}>
-                  {profile.grade != null && `${profile.grade}级`}
-                  {profile.grade != null && profile.tag && ' · '}
-                  {profile.tag === 'graduate' ? '🎓 毕业生' : profile.tag === 'student' ? '📚 在校生' : ''}
-                  {isMe && profile.grade != null && !gradeSetByAdmin && (
-                    <span style={{ fontSize: 12, color: 'var(--text-light)', marginLeft: 6 }}>（年级待管理员确认）</span>
+              {((profile.grade != null) || profile.tag || profile.role === 'admin' || profile.role === 'super') && (
+                <div className="profile-tags">
+                  {profile.role === 'super' && <span className="profile-tag tag-super">🛡️ 超级管理员</span>}
+                  {profile.role === 'admin' && <span className="profile-tag tag-admin">🛡️ 管理员</span>}
+                  {profile.grade != null && <span className="profile-tag tag-grade">📅 {profile.grade}级</span>}
+                  {profile.tag === 'graduate' && <span className="profile-tag tag-graduate">🎓 毕业生</span>}
+                  {profile.tag === 'student' && <span className="profile-tag tag-student">📚 在校生</span>}
+                  {profile.tag && profile.tag !== 'graduate' && profile.tag !== 'student' && (
+                    <span className="profile-tag tag-student">🏷️ {profile.tag}</span>
                   )}
-                </p>
+                  {isMe && profile.grade != null && !gradeSetByAdmin && (
+                    <span className="profile-tag tag-pending">年级待管理员确认</span>
+                  )}
+                </div>
               )}
               {profile.uid && (
                 <p

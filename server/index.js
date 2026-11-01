@@ -384,7 +384,7 @@ app.get('/api/users/search', async (req, res) => {
 
 app.get('/api/users/:id', async (req, res) => {
   const user = await db.prepare(
-    `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation,
+    `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation, role,
             real_name, class_name, address, email, wechat, qq, phone,
             show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
             grade, tag, show_uid
@@ -395,7 +395,7 @@ app.get('/api/users/:id', async (req, res) => {
   const out = {
     username: user.username, nickname: user.nickname, avatar: user.avatar,
     bio: user.bio, created_at: user.created_at, profile_public: !!user.profile_public, postCount,
-    grade: user.grade, tag: user.tag,
+    grade: user.grade, tag: user.tag, role: user.role,
   };
   // 信誉分仅对本人与超级管理员可见
   const viewer = await getCurrentUser(req);

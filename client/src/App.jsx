@@ -38,6 +38,15 @@ export default function App() {
           <div className="footer-slogan">以青春之我，建青春之鹏山</div>
           <div className="footer-meta">石狮市鹏山实验学校 · 灵秀片区九年一贯制实验学校</div>
           <div className="footer-copy">弘扬大鹏精神：志趣高远 · 精神豪迈 · 追求自由 · 超越自我</div>
+          <div className="footer-contact">
+            <div className="footer-contact-title">问题反馈 · 联系我们</div>
+            <div className="footer-contact-grid">
+              <a href="mailto:hx_gnet@qq.com">✉️ 反馈邮箱 hx_gnet@qq.com</a>
+              <span>📰 公众号「鹏山实验学校」：PSXX202109</span>
+              <span>🛠️ 公众号「虎孝服务」：hx_Gnet</span>
+              <a href="https://work.weixin.qq.com/ca/cawcde6393385f3cec" target="_blank" rel="noopener noreferrer">💬 在线微信客服</a>
+            </div>
+          </div>
         </footer>
       </AuthProvider>
     </ThemeProvider>
