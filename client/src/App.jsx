@@ -41,6 +41,7 @@ export default function App() {
           <div className="footer-contact">
             <div className="footer-contact-title">问题反馈 · 联系我们</div>
             <div className="footer-contact-grid">
+              <a href="https://www.webintoapp.com/store/1745442" target="_blank" rel="noopener noreferrer">📲 下载 / 更新 App</a>
               <a href="mailto:hx_gnet@qq.com">✉️ 反馈邮箱 hx_gnet@qq.com</a>
               <span>📰 公众号「鹏山实验学校」：PSXX202109</span>
               <span>🛠️ 公众号「虎孝服务」：hx_Gnet</span>

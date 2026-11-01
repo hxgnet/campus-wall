@@ -48,8 +48,9 @@ export default function Header() {
         </NavLink>
         <nav className="nav-links">
           <div className="nav-inner">
-          <NavLink to="/" end>首页</NavLink>
+          <NavLink to="/">首页</NavLink>
           <NavLink to="/create">发帖</NavLink>
+          <a href="https://www.webintoapp.com/store/1745442" target="_blank" rel="noopener noreferrer">下载 App</a>
           {user ? (
             <>
               <NavLink to="/apply">申请</NavLink>
