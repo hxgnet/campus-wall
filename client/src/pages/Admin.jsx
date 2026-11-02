@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api.js';
+import MediaView from '../components/MediaView.jsx';
 
 export default function Admin() {
   const [loggedIn, setLoggedIn] = useState(api.isAdmin());
@@ -42,6 +43,26 @@ export default function Admin() {
   const [editSaving, setEditSaving] = useState(false);
   const [appNote, setAppNote] = useState('');
 
+  // 举报状态筛选
+  const [reportStatus, setReportStatus] = useState('pending');
+  // 板块管理
+  const [categories, setCategories] = useState([]);
+  const [catForm, setCatForm] = useState({ name: '', icon: '📝', sort_order: 0, is_activity: false });
+  // 操作记录
+  const [logs, setLogs] = useState([]);
+  // 注销审批
+  const [deletionRequests, setDeletionRequests] = useState([]);
+  const [delFilter, setDelFilter] = useState('pending');
+  // 帖子访问数据
+  const [analytics, setAnalytics] = useState(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  // 超管改名 / 标签
+  const [userEdit, setUserEdit] = useState({ uid: null, username: '', custom_tag: '', tag_color: '' });
+  // 超级通知
+  const [notifyImage, setNotifyImage] = useState('');
+  const [notifyBadge, setNotifyBadge] = useState('');
+  const [notifyBadgeColor, setNotifyBadgeColor] = useState('#ff3b30');
+
   const load = async () => {
     if (tab === 'posts') {
       setLoading(true);
@@ -54,7 +75,13 @@ export default function Admin() {
         setLoggedIn(false);
       } finally { setLoading(false); }
     } else if (tab === 'reports') {
-      try { setReports(await api.getReports()); } catch (e) { alert(e.message); }
+      try { setReports(await api.getReports(reportStatus)); } catch (e) { alert(e.message); }
+    } else if (tab === 'categories') {
+      try { setCategories(await api.getAdminCategories()); } catch (e) { alert(e.message); }
+    } else if (tab === 'logs') {
+      try { setLogs(await api.getAdminLogs()); } catch (e) { alert(e.message); }
+    } else if (tab === 'deletion') {
+      try { setDeletionRequests(await api.getDeletionRequests(delFilter)); } catch (e) { alert(e.message); }
     } else if (tab === 'users') {
       try { setUsers(await api.getUsers()); } catch (e) { alert(e.message); }
     } else if (tab === 'alerts') {
@@ -84,7 +111,7 @@ export default function Admin() {
       load();
       api.getAdminStats().then(setStats).catch(() => {});
     }
-  }, [loggedIn, filter, tab, appFilter]);
+  }, [loggedIn, filter, tab, appFilter, reportStatus, delFilter]);
 
   const login = async (e) => {
     e.preventDefault();
@@ -105,8 +132,17 @@ export default function Admin() {
   const logout = () => { api.adminLogout(); setLoggedIn(false); setPassword(''); setRole(''); setTab('posts'); };
 
   const updateStatus = async (id, status) => {
-    try { await api.updatePostStatus(id, status); setPosts((prev) => prev.filter((p) => p.id !== id)); }
-    catch (e) { alert(e.message); }
+    const input = status === 'rejected'
+      ? prompt('请填写驳回理由（用户会在通知与「我的帖子」中看到）', '')
+      : prompt('可填写审核备注（留空则不带理由，选填）', '');
+    if (input === null) return;
+    const note = input.trim();
+    if (status === 'rejected' && !note) { alert('驳回必须填写处理理由'); return; }
+    try {
+      await api.updatePostStatus(id, status, note);
+      setPosts((prev) => prev.filter((p) => p.id !== id));
+      setDetail((d) => (d && d.post.id === id ? { ...d, post: { ...d.post, status, review_note: note || d.post.review_note } } : d));
+    } catch (e) { alert(e.message); }
   };
 
   // 设置 / 取消热门帖（管理员与超管均可用）
@@ -152,8 +188,11 @@ export default function Admin() {
 
   const forceDelete = async (id) => {
     if (!confirm('确定强制删除该帖子？此操作不可恢复，将同时清理图片、评论、点赞、收藏、举报与相关通知，并扣除作者 10 点信誉分。')) return;
+    const input = prompt('请填写删除理由（用户会在通知中看到）', '违反社区规范');
+    if (input === null) return;
+    const reason = input.trim() || '违反社区规范';
     try {
-      await api.adminDeletePost(id);
+      await api.adminDeletePost(id, reason);
       setDetail(null);
       await load();
       api.getAdminStats().then(setStats).catch(() => {});
@@ -237,7 +276,14 @@ export default function Admin() {
   const openUserDetail = async (uid) => {
     setUserDetailLoading(true);
     try {
-      setUserDetail(await api.getUserDetail(uid));
+      const d = await api.getUserDetail(uid);
+      setUserDetail(d);
+      setUserEdit({
+        uid,
+        username: d.user.username || '',
+        custom_tag: d.user.custom_tag || '',
+        tag_color: d.user.tag_color || '#ff3b30',
+      });
     } catch (e) { alert(e.message); }
     finally { setUserDetailLoading(false); }
   };
@@ -287,19 +333,123 @@ export default function Admin() {
     if (!notifyAll && uids.length === 0) { alert('请输入接收用户 uid'); return; }
     setNotifySending(true);
     try {
-      const r = await api.notifyUsers(
-        notifyAll ? { all: true, content: notifyContent.trim() } : { all: false, uids, content: notifyContent.trim() }
-      );
+      const payload = {
+        content: notifyContent.trim(),
+        image: notifyImage || null,
+        badgeText: notifyBadge.trim() || null,
+        badgeColor: notifyBadgeColor || null,
+        ...(notifyAll ? { all: true } : { all: false, uids }),
+      };
+      const r = await api.notifyUsers(payload);
       setNotifyResult(`已发送给 ${r.sent} 位用户`);
       setNotifyContent('');
+      setNotifyImage('');
+      setNotifyBadge('');
       if (!notifyAll) setNotifyUids('');
     } catch (err) { alert(err.message); }
     finally { setNotifySending(false); }
   };
 
   const handleReport = async (id, status) => {
-    try { await api.updateReport(id, status); setReports((prev) => prev.filter((r) => r.id !== id)); }
+    const labels = { resolved: '已处理', valid: '举报有效', invalid: '举报无效', ignored: '已忽略' };
+    const input = prompt(`请填写处理理由（${labels[status] || status}，举报人可见；忽略可留空）`, '');
+    if (input === null) return;
+    const note = input.trim();
+    if (status !== 'ignored' && !note) { alert('请填写处理理由'); return; }
+    try {
+      await api.updateReport(id, status, note);
+      setReports((prev) => prev.filter((r) => r.id !== id));
+    } catch (e) { alert(e.message); }
+  };
+
+  // ---------- 板块管理 ----------
+  const addCategory = async (e) => {
+    e.preventDefault();
+    if (!catForm.name.trim()) { alert('请输入板块名称'); return; }
+    try {
+      await api.createCategory(catForm);
+      setCatForm({ name: '', icon: '📝', sort_order: 0, is_activity: false });
+      await load();
+    } catch (err) { alert(err.message); }
+  };
+
+  const renameCategory = async (c) => {
+    const name = prompt('新的板块名称', c.name);
+    if (name === null) return;
+    const icon = prompt('板块图标（emoji）', c.icon);
+    if (icon === null) return;
+    try {
+      await api.updateCategory(c.id, { name: name.trim(), icon: icon.trim() || '📝' });
+      await load();
+    } catch (err) { alert(err.message); }
+  };
+
+  const removeCategory = async (c) => {
+    if (!confirm(`确定删除板块「${c.name}」？该板块下 ${c.post_count} 篇帖子将迁移到其他板块，此操作不可恢复。`)) return;
+    try {
+      const r = await api.deleteCategory(c.id);
+      alert(`板块已删除，帖子已迁移至「${r.moved_to}」`);
+      await load();
+    } catch (err) { alert(err.message); }
+  };
+
+  // ---------- 注销审批 ----------
+  const handleDeletion = async (r, status) => {
+    const input = prompt(
+      status === 'approved'
+        ? '确认同意注销？该用户账号及关联数据将被永久删除。可填写备注（仅记录在操作日志）'
+        : '请填写驳回理由（用户会在通知中看到）',
+      ''
+    );
+    if (input === null) return;
+    const note = input.trim();
+    if (status === 'rejected' && !note) { alert('驳回必须填写理由'); return; }
+    if (status === 'approved' && !confirm(`确定永久删除用户 @${r.username} 的账号？`)) return;
+    try {
+      await api.updateDeletionRequest(r.id, status, note);
+      alert(status === 'approved' ? '已同意注销并删除账号' : '已驳回注销申请');
+      await load();
+    } catch (e) { alert(e.message); }
+  };
+
+  // ---------- 帖子访问数据 ----------
+  const openAnalytics = async (id) => {
+    setAnalyticsLoading(true);
+    try { setAnalytics(await api.getPostAnalytics(id)); }
     catch (e) { alert(e.message); }
+    finally { setAnalyticsLoading(false); }
+  };
+
+  // ---------- 超管改名 / 标签 ----------
+  const saveUsername = async () => {
+    if (!userDetail) return;
+    if (!confirm('确定修改该用户的用户名？用户会收到系统通知。')) return;
+    try {
+      const r = await api.updateUsername(userDetail.user.uid, userEdit.username.trim());
+      setUserDetail((d) => ({ ...d, user: { ...d.user, username: r.username } }));
+      alert('用户名已修改，用户已收到通知');
+      await load();
+    } catch (e) { alert(e.message); }
+  };
+
+  const saveUserTags = async () => {
+    if (!userDetail) return;
+    try {
+      const r = await api.updateUserTags(userDetail.user.uid, userEdit.custom_tag, userEdit.tag_color);
+      setUserDetail((d) => ({ ...d, user: { ...d.user, custom_tag: r.custom_tag, tag_color: r.tag_color } }));
+      await load();
+      alert('标签已更新，用户已收到通知');
+    } catch (e) { alert(e.message); }
+  };
+
+  // ---------- 超级通知图片 ----------
+  const onNotifyImage = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const r = await api.uploadAdminImage(file);
+      setNotifyImage(r.url);
+    } catch (err) { alert(err.message); }
   };
 
   // 打开申请者资料编辑
@@ -401,10 +551,13 @@ export default function Admin() {
             { k: 'reports', l: '🚩 举报处理' },
             ...(isSuper ? [
               { k: 'applications', l: '📨 申请处理' },
+              { k: 'deletion', l: '🗑️ 注销审批' },
               { k: 'users', l: '👥 用户管理' },
+              { k: 'categories', l: '🗂️ 板块管理' },
               { k: 'alerts', l: '🛡️ 安全告警' },
               { k: 'bans', l: '⛔ 封禁名单' },
               { k: 'notify', l: '📢 通知群发' },
+              { k: 'logs', l: '📜 操作记录' },
             ] : []),
           ].map((t) => (
             <button key={t.k} className={`cat-tab ${tab === t.k ? 'active' : ''}`} onClick={() => setTab(t.k)}>{t.l}</button>
@@ -433,9 +586,10 @@ export default function Admin() {
                   <div style={{ fontSize: 12, color: 'var(--text-light)', marginBottom: 6 }}>@{p.nickname} · ❤️ {p.likes} · 👁️ {p.views}</div>
                   <div className="post-content">{p.content}</div>
                   {p.tags && p.tags.length > 0 && <div>{p.tags.map((t, i) => <span key={i} className="tag-chip">#{t}</span>)}</div>}
-                  {p.images && p.images.length > 0 && (
-                    <div className="post-images" style={{ marginTop: 10 }}>
-                      {p.images.map((img, i) => (<img key={i} src={img} alt="" style={{ cursor: 'pointer' }} onClick={() => setModalImg(img)} />))}
+                  <MediaView media={p.media} images={p.images} small />
+                  {p.review_note && (
+                    <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-light)' }}>
+                      <strong>处理理由：</strong>{p.review_note}
                     </div>
                   )}
                   <div className="admin-actions">
@@ -457,34 +611,83 @@ export default function Admin() {
         )}
 
         {tab === 'reports' && (
-          reports.length === 0 ? (
-            <div className="empty"><div className="empty-icon">🚩</div><div>暂无举报</div></div>
-          ) : reports.map((r) => (
-            <div className="admin-post" key={r.id}>
-              <div className="admin-post-head">
-                <span className={`status-badge status-${r.status}`}>{r.status === 'pending' ? '待处理' : r.status}</span>
-                <span className="post-time">{r.created_at}</span>
-              </div>
-              <div style={{ fontSize: 13, marginBottom: 8 }}>
-                <strong>举报原因：</strong>{r.reason}
-              </div>
-              {r.reported_uid && (
-                <div style={{ fontSize: 13, marginBottom: 8 }}>
-                  <strong>举报用户 UID：</strong>{r.reported_uid}
-                </div>
-              )}
-              {r.post_content && (
-                <div style={{ fontSize: 13, color: 'var(--text-light)', background: 'var(--bg)', padding: 8, borderRadius: 8 }}>
-                  <strong>[{r.post_category}]</strong> {r.post_content}
-                </div>
-              )}
-              <div className="admin-actions">
-                <button className="btn-success" onClick={() => handleReport(r.id, 'resolved')}>标记已处理</button>
-                <button className="btn-secondary" onClick={() => handleReport(r.id, 'ignored')}>忽略</button>
-                {r.post_id && isSuper && <button className="btn-danger" onClick={() => { if (confirm('删除该帖子？将扣除作者 10 点信誉分。')) { api.adminDeletePost(r.post_id).then(() => handleReport(r.id, 'resolved')); } }}>删除帖子</button>}
-              </div>
+          <>
+            <div className="cat-tabs" style={{ paddingTop: 0 }}>
+              {[
+                { k: 'pending', l: '⏳ 待处理' },
+                { k: 'resolved', l: '✅ 已处理' },
+                { k: 'valid', l: '✔️ 有效' },
+                { k: 'invalid', l: '✖️ 无效' },
+                { k: 'ignored', l: '🙈 已忽略' },
+                { k: 'all', l: '📋 全部' },
+              ].map((t) => (
+                <button key={t.k} className={`cat-tab ${reportStatus === t.k ? 'active' : ''}`} onClick={() => setReportStatus(t.k)}>{t.l}</button>
+              ))}
             </div>
-          ))
+            {reports.length === 0 ? (
+              <div className="empty"><div className="empty-icon">🚩</div><div>暂无举报</div></div>
+            ) : reports.map((r) => (
+              <div className="admin-post" key={r.id}>
+                <div className="admin-post-head">
+                  <span className={`status-badge status-${r.status}`}>
+                    {{ pending: '待处理', resolved: '已处理', valid: '有效', invalid: '无效', ignored: '已忽略' }[r.status] || r.status}
+                  </span>
+                  <span className="post-time">{r.created_at}</span>
+                </div>
+                <div style={{ fontSize: 13, marginBottom: 8 }}>
+                  <strong>举报原因：</strong>{r.reason}
+                </div>
+                {(r.reporter_nickname || r.reporter_username) && (
+                  <div style={{ fontSize: 13, marginBottom: 8 }}>
+                    <strong>举报人：</strong>{r.reporter_nickname || '—'}{r.reporter_username ? ` (@${r.reporter_username})` : ''}
+                  </div>
+                )}
+                {r.reported_uid && (
+                  <div style={{ fontSize: 13, marginBottom: 8 }}>
+                    <strong>被举报用户 UID：</strong>{r.reported_uid}
+                  </div>
+                )}
+                {r.post_content && (
+                  <div style={{ fontSize: 13, color: 'var(--text-light)', background: 'var(--bg)', padding: 8, borderRadius: 8, marginBottom: 6 }}>
+                    <strong>[{r.post_category}]</strong> {r.post_content}
+                  </div>
+                )}
+                {r.comment_content && (
+                  <div style={{ fontSize: 13, color: 'var(--text-light)', background: 'var(--bg)', padding: 8, borderRadius: 8, marginBottom: 6 }}>
+                    <strong>被举报评论：</strong> {r.comment_content}
+                  </div>
+                )}
+                {r.handled_at && (
+                  <div style={{ fontSize: 12, color: 'var(--text-light)', background: 'var(--bg)', padding: 8, borderRadius: 8, marginBottom: 8 }}>
+                    <div><strong>处理人：</strong>{r.handled_by || '—'}</div>
+                    <div><strong>处理时间：</strong>{r.handled_at}</div>
+                    <div><strong>处理理由：</strong>{r.handle_note || '—'}</div>
+                  </div>
+                )}
+                {r.status === 'pending' && (
+                  <div className="admin-actions">
+                    <button className="btn-success" onClick={() => handleReport(r.id, 'resolved')}>标记已处理</button>
+                    <button className="btn-success" onClick={() => handleReport(r.id, 'valid')}>判定有效</button>
+                    <button className="btn-secondary" onClick={() => handleReport(r.id, 'invalid')}>判定无效</button>
+                    <button className="btn-secondary" onClick={() => handleReport(r.id, 'ignored')}>忽略</button>
+                    {r.post_id && isSuper && (
+                      <button
+                        className="btn-danger"
+                        onClick={() => {
+                          if (!confirm('删除该帖子？将扣除作者 10 点信誉分。')) return;
+                          const reason = prompt('请填写删除理由（作者可见）', '举报核实违规');
+                          if (reason === null) return;
+                          api.adminDeletePost(r.post_id, reason.trim() || '举报核实违规')
+                            .then(() => handleReport(r.id, 'resolved'))
+                            .catch((e) => alert(e.message));
+                        }}
+                      >删除帖子</button>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </>
         )}
 
         {isSuper && tab === 'applications' && (
@@ -526,6 +729,111 @@ export default function Admin() {
                 </div>
               ))
             }
+          </>
+        )}
+
+        {isSuper && tab === 'deletion' && (
+          <>
+            <div className="cat-tabs" style={{ paddingTop: 0 }}>
+              {[
+                { k: 'pending', l: '⏳ 待审批' },
+                { k: 'approved', l: '✅ 已通过' },
+                { k: 'rejected', l: '❌ 已驳回' },
+                { k: 'all', l: '📋 全部' },
+              ].map((t) => (
+                <button key={t.k} className={`cat-tab ${delFilter === t.k ? 'active' : ''}`} onClick={() => setDelFilter(t.k)}>{t.l}</button>
+              ))}
+            </div>
+            {deletionRequests.length === 0 ? (
+              <div className="empty"><div className="empty-icon">🗑️</div><div>暂无注销申请</div></div>
+            ) : deletionRequests.map((r) => (
+              <div className="admin-post" key={r.id}>
+                <div className="admin-post-head">
+                  <span style={{ fontWeight: 600 }}>{r.nickname} <span style={{ color: 'var(--text-light)', fontWeight: 400 }}>(@{r.username})</span></span>
+                  <span className={`status-badge status-${r.status}`}>
+                    {{ pending: '待审批', approved: '已通过', rejected: '已驳回' }[r.status] || r.status}
+                  </span>
+                  <span className="post-time">{r.created_at}</span>
+                </div>
+                <div className="post-time" style={{ marginBottom: 6 }}>
+                  UID: {r.uid}
+                  {r.real_name && ` · 姓名：${r.real_name}`}
+                  {r.class_name && ` · 班级：${r.class_name}`}
+                  {r.grade != null && ` · ${r.grade}级`}
+                  {r.reputation != null && ` · 信誉分：${r.reputation}`}
+                  {r.banned && ' · 已封禁'}
+                </div>
+                {r.note && <div style={{ fontSize: 13, marginBottom: 6 }}><strong>用户说明：</strong>{r.note}</div>}
+                {r.images && r.images.length > 0 && (
+                  <div className="post-images" style={{ marginTop: 8 }}>
+                    {r.images.map((img, i) => (<img key={i} src={img} alt="智学网卷子" style={{ cursor: 'pointer' }} onClick={() => setModalImg(img)} />))}
+                  </div>
+                )}
+                {r.admin_note && (
+                  <div style={{ marginTop: 8, fontSize: 13, color: 'var(--text-light)' }}><strong>管理员备注：</strong>{r.admin_note}</div>
+                )}
+                {r.status === 'pending' && (
+                  <div className="admin-actions">
+                    <button className="btn-success" onClick={() => handleDeletion(r, 'approved')}>同意注销</button>
+                    <button className="btn-warning" onClick={() => handleDeletion(r, 'rejected')}>驳回申请</button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </>
+        )}
+
+        {isSuper && tab === 'categories' && (
+          <>
+            <form className="admin-post" onSubmit={addCategory}>
+              <h3 style={{ fontSize: 15, marginBottom: 10 }}>➕ 新增板块</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 90px 90px', gap: 10 }}>
+                <input className="form-input" placeholder="板块名称（1-12 字）" value={catForm.name} onChange={(e) => setCatForm({ ...catForm, name: e.target.value })} />
+                <input className="form-input" placeholder="图标" value={catForm.icon} onChange={(e) => setCatForm({ ...catForm, icon: e.target.value })} />
+                <input className="form-input" type="number" placeholder="排序" value={catForm.sort_order} onChange={(e) => setCatForm({ ...catForm, sort_order: Number(e.target.value) })} />
+              </div>
+              <label className="anon-toggle" style={{ marginTop: 10 }}>
+                <input type="checkbox" checked={catForm.is_activity} onChange={(e) => setCatForm({ ...catForm, is_activity: e.target.checked })} />
+                <span>该板块为「活动」板块（支持报名与活动标签互动）</span>
+              </label>
+              <button type="submit" className="btn btn-primary" style={{ marginTop: 10 }}>添加板块</button>
+            </form>
+
+            {categories.length === 0 ? (
+              <div className="empty"><div className="empty-icon">🗂️</div><div>暂无板块</div></div>
+            ) : categories.map((c) => (
+              <div className="admin-post" key={c.id}>
+                <div className="admin-post-head">
+                  <span style={{ fontWeight: 600, fontSize: 16 }}>{c.icon} {c.name}</span>
+                  {c.is_activity && <span className="status-badge status-approved">活动板块</span>}
+                  <span className="post-time">排序 {c.sort_order} · {c.post_count} 篇帖子</span>
+                </div>
+                <div className="admin-actions">
+                  <button className="btn-secondary" onClick={() => renameCategory(c)}>重命名 / 改图标</button>
+                  <button className="btn-danger" onClick={() => removeCategory(c)}>删除板块</button>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+
+        {isSuper && tab === 'logs' && (
+          <>
+            {logs.length === 0 ? (
+              <div className="empty"><div className="empty-icon">📜</div><div>暂无操作记录</div></div>
+            ) : logs.map((l) => (
+              <div className="admin-post" key={l.id}>
+                <div className="admin-post-head">
+                  <span style={{ fontWeight: 600 }}>{l.action}</span>
+                  <span className="post-time">{l.created_at} · {l.admin_role === 'super' ? '超级管理员' : '管理员'}{l.admin_name ? ` · ${l.admin_name}` : ''}</span>
+                </div>
+                <div className="post-time" style={{ marginBottom: 4 }}>
+                  对象：{l.target_type || '—'} {l.target_id ? `#${l.target_id}` : ''}
+                </div>
+                {l.reason && <div style={{ fontSize: 13 }}><strong>理由 / 备注：</strong>{l.reason}</div>}
+                {l.detail && <div style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 4 }}>{l.detail}</div>}
+              </div>
+            ))}
           </>
         )}
 
@@ -643,6 +951,20 @@ export default function Admin() {
             <div className="form-group">
               <textarea className="form-textarea" placeholder="输入通知内容..." value={notifyContent} onChange={(e) => setNotifyContent(e.target.value)} />
             </div>
+            <div className="form-group">
+              <label style={{ fontSize: 12, color: 'var(--text-light)', display: 'block', marginBottom: 4 }}>通知图片（可选，展示在通知卡片中）</label>
+              <input type="file" accept="image/*" onChange={onNotifyImage} />
+              {notifyImage && (
+                <div style={{ marginTop: 8, position: 'relative', display: 'inline-block' }}>
+                  <img src={notifyImage} alt="" style={{ maxWidth: 180, borderRadius: 8 }} />
+                  <button type="button" className="btn-secondary" style={{ marginLeft: 8, padding: '4px 10px', fontSize: 12 }} onClick={() => setNotifyImage('')}>移除</button>
+                </div>
+              )}
+            </div>
+            <div className="form-group" style={{ display: 'grid', gridTemplateColumns: '1fr 120px', gap: 10 }}>
+              <input className="form-input" placeholder="大标签文字（如：紧急通知）" value={notifyBadge} onChange={(e) => setNotifyBadge(e.target.value)} />
+              <input className="form-input" type="color" value={notifyBadgeColor} onChange={(e) => setNotifyBadgeColor(e.target.value)} style={{ padding: 2, height: 42 }} />
+            </div>
             <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginBottom: 10, fontSize: 14 }}>
               <label className="anon-toggle">
                 <input type="radio" checked={notifyAll} onChange={() => setNotifyAll(true)} />
@@ -684,6 +1006,23 @@ export default function Admin() {
                 <div className="admin-detail-item"><span className="admin-detail-label">发布时间</span><span>{detail.post.created_at}</span></div>
               </div>
               <div className="admin-detail-content">{detail.post.content}</div>
+              {(detail.post.media || []).length > 0 && <MediaView media={detail.post.media} images={detail.post.images} />}
+              {detail.post.quote_post_id && (
+                <div style={{ marginTop: 10, fontSize: 13, color: 'var(--text-light)', background: 'var(--bg)', padding: 8, borderRadius: 8 }}>
+                  <strong>引用帖子 #{detail.post.quote_post_id}</strong>
+                  {detail.post.quote_content ? `：${detail.post.quote_content}` : ''}
+                </div>
+              )}
+              {detail.post.review_note && (
+                <div style={{ marginTop: 10, fontSize: 13, color: 'var(--warning)' }}>
+                  <strong>最近处理理由：</strong>{detail.post.review_note}
+                </div>
+              )}
+              {detail.post.activity_signup_required && (
+                <div style={{ marginTop: 8, fontSize: 13, color: 'var(--text-light)' }}>
+                  <strong>活动报名：</strong>需要报名{detail.post.activity_signup_deadline ? ` · 截止 ${detail.post.activity_signup_deadline}` : ''}
+                </div>
+              )}
             </div>
 
             <div className="admin-detail-section">
@@ -732,6 +1071,7 @@ export default function Admin() {
             </div>
 
             <div className="admin-detail-actions">
+              {isSuper && <button className="btn btn-primary" onClick={() => openAnalytics(detail.post.id)}>👁 访问数据</button>}
               {detail.post.status === 'approved' && (
                 <button className={detail.post.is_hot ? 'btn btn-warning' : 'btn btn-success'} onClick={() => toggleHot(detail.post)}>
                   {detail.post.is_hot ? '取消热门' : '🔥 设为热门'}
@@ -740,6 +1080,55 @@ export default function Admin() {
               {isSuper && <button className="btn btn-danger" onClick={() => forceDelete(detail.post.id)}>强制删除</button>}
               <button className="btn btn-secondary" onClick={() => setDetail(null)}>关闭</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {analyticsLoading && (
+        <div className="modal-overlay"><div className="modal-box admin-detail-box"><div className="loading">加载访问数据...</div></div></div>
+      )}
+
+      {analytics && (
+        <div className="modal-overlay" onClick={() => setAnalytics(null)}>
+          <div className="modal-box admin-detail-box" onClick={(e) => e.stopPropagation()}>
+            <div className="admin-detail-head">
+              <h3>帖子 #{analytics.post.id} 访问数据</h3>
+              <button className="btn btn-secondary" onClick={() => setAnalytics(null)}>关闭</button>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>概览</h4>
+              <div className="admin-detail-grid">
+                <div className="admin-detail-item"><span className="admin-detail-label">浏览用户数</span><span>{analytics.summary.view_users}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">总浏览次数</span><span>{analytics.summary.view_times}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">点赞数</span><span>{analytics.summary.likes}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">收藏数</span><span>{analytics.summary.favorites}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">评论人数</span><span>{analytics.summary.commenters}</span></div>
+              </div>
+            </div>
+
+            {[
+              { key: 'viewers', title: '谁看过（按次数排序）', extra: (v) => `${v.view_count} 次 · ${v.last_viewed_at || ''}` },
+              { key: 'likes', title: '谁点赞了', extra: (v) => v.created_at || '' },
+              { key: 'favorites', title: '谁收藏了', extra: (v) => v.created_at || '' },
+              { key: 'commenters', title: '谁评论了', extra: (v) => `${v.count} 条 · ${v.last_at || ''}` },
+            ].map((group) => (
+              <div className="admin-detail-section" key={group.key}>
+                <h4>{group.title}（{(analytics[group.key] || []).length}）</h4>
+                {(analytics[group.key] || []).length === 0 ? (
+                  <p style={{ color: 'var(--text-light)', fontSize: 13 }}>暂无</p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {analytics[group.key].map((v, i) => (
+                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 13, borderBottom: '1px solid var(--border)', paddingBottom: 4 }}>
+                        <span>{v.nickname || '已注销用户'}{v.username ? ` (@${v.username})` : ''}</span>
+                        <span style={{ color: 'var(--text-light)' }}>{group.extra(v)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -768,6 +1157,26 @@ export default function Admin() {
                 <div className="admin-detail-item"><span className="admin-detail-label">协议同意时间</span><span>{userDetail.user.agreed_at || '—'}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">ID 公开</span><span>{userDetail.user.show_uid ? '是' : '否'}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">封禁状态</span><span>{userDetail.user.banned ? `已封禁（${userDetail.user.banned_reason || '无原因'} · ${userDetail.user.banned_at || ''}）` : '正常'}</span></div>
+              </div>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>超管操作 · 用户名 / 自定义标签</h4>
+              <div className="admin-detail-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                <div className="form-group" style={{ margin: '4px 0' }}>
+                  <label style={{ fontSize: 12, color: 'var(--text-light)' }}>用户名</label>
+                  <input className="form-input" style={{ fontSize: 13 }} value={userEdit.username} onChange={(e) => setUserEdit({ ...userEdit, username: e.target.value })} />
+                  <button className="btn btn-primary" style={{ marginTop: 6, padding: '4px 12px', fontSize: 12 }} onClick={saveUsername}>保存用户名并发通知</button>
+                </div>
+                <div className="form-group" style={{ margin: '4px 0' }}>
+                  <label style={{ fontSize: 12, color: 'var(--text-light)' }}>自定义标签（留空清除）</label>
+                  <input className="form-input" style={{ fontSize: 13 }} value={userEdit.custom_tag} onChange={(e) => setUserEdit({ ...userEdit, custom_tag: e.target.value })} />
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
+                    <input type="color" value={userEdit.tag_color || '#ff3b30'} onChange={(e) => setUserEdit({ ...userEdit, tag_color: e.target.value })} style={{ width: 40, height: 32, padding: 2 }} />
+                    <span style={{ color: userEdit.tag_color || 'var(--primary)', fontSize: 13 }}>{userEdit.custom_tag || '标签预览'}</span>
+                    <button className="btn btn-success" style={{ padding: '4px 12px', fontSize: 12 }} onClick={saveUserTags}>保存标签</button>
+                  </div>
+                </div>
               </div>
             </div>
 

@@ -23,13 +23,13 @@ export default function Login() {
   const { login, register } = useAuth();
   const navigate = useNavigate();
 
-  // 同意协议后获取经纬度（用户拒绝或不支持则返回 null，不阻塞注册）
+  // 注册强制要求定位：用户拒绝授权或获取失败时不允许注册
   const getGeo = () => new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
     navigator.geolocation.getCurrentPosition(
       (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
       () => resolve(null),
-      { enableHighAccuracy: false, timeout: 5000, maximumAge: 600000 }
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 600000 }
     );
   });
 
@@ -44,7 +44,13 @@ export default function Login() {
       if (mode === 'login') {
         await login(username, password);
       } else {
+        if (username.trim().length < 3) { alert('用户名至少 3 位'); return; }
+        if (password.length < 6) { alert('密码至少 6 位'); return; }
         const geo = await getGeo();
+        if (!geo) {
+          alert('注册必须授权定位：请在系统设置中允许本应用获取位置，然后重新注册。');
+          return;
+        }
         await register(username, password, nickname, geo);
       }
       navigate('/');
@@ -96,7 +102,9 @@ export default function Login() {
             </button>
           </form>
           <p style={{ fontSize: 12, color: 'var(--text-light)', textAlign: 'center', marginTop: 16 }}>
-            注册后可发帖、评论、收藏、接收通知
+            {mode === 'register'
+              ? '注册必须授权定位，否则无法完成注册；注册后可发帖、评论、私信、抢红包'
+              : '登录后可发帖、评论、收藏、接收通知'}
           </p>
         </div>
       </div>

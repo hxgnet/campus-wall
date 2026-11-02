@@ -1,4 +1,5 @@
 import { Routes, Route } from 'react-router-dom';
+import { useEffect } from 'react';
 import { AuthProvider } from './AuthContext.jsx';
 import { ThemeProvider } from './ThemeContext.jsx';
 import Header from './components/Header.jsx';
@@ -12,9 +13,31 @@ import Profile from './pages/Profile.jsx';
 import Notifications from './pages/Notifications.jsx';
 import Favorites from './pages/Favorites.jsx';
 import Messages from './pages/Messages.jsx';
+import MessagesHub from './pages/MessagesHub.jsx';
+import GroupChat from './pages/GroupChat.jsx';
 import Apply from './pages/Apply.jsx';
+import { api } from './api.js';
 
 export default function App() {
+  // 版本检测：WebIntoApp 打包的 APK 打开后若服务端已更新，提示刷新以获取最新内容
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const { version } = await api.getVersion();
+        const prev = localStorage.getItem('app_version');
+        if (prev && prev !== version) {
+          localStorage.setItem('app_version', version);
+          if (window.confirm('检测到新版本，是否立即刷新以获取最新内容？')) window.location.reload();
+        } else {
+          localStorage.setItem('app_version', version);
+        }
+      } catch { /* 忽略网络异常 */ }
+    };
+    check();
+    const timer = setInterval(check, 30 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   return (
     <ThemeProvider>
       <AuthProvider>
@@ -27,7 +50,9 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/profile/:id" element={<Profile />} />
           <Route path="/notifications" element={<Notifications />} />
+          <Route path="/messages" element={<MessagesHub />} />
           <Route path="/messages/:uid" element={<Messages />} />
+          <Route path="/groups/:id" element={<GroupChat />} />
           <Route path="/favorites" element={<Favorites />} />
           <Route path="/apply" element={<Apply />} />
           <Route path="/admin" element={<Admin />} />

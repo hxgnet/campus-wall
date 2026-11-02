@@ -1,22 +1,54 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, CATEGORIES, EMOJIS } from '../api.js';
 import { useAuth } from '../AuthContext.jsx';
 
+function kindOf(mime) {
+  if (/^image\//.test(mime)) return 'image';
+  if (/^video\//.test(mime)) return 'video';
+  if (/^audio\//.test(mime)) return 'audio';
+  return null;
+}
+
 export default function CreatePost() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { user } = useAuth();
+  const [categories, setCategories] = useState(CATEGORIES);
   const [category, setCategory] = useState(CATEGORIES[0].name);
   const [content, setContent] = useState('');
   const [anonymous, setAnonymous] = useState(false);
   const [tagInput, setTagInput] = useState('');
   const [tags, setTags] = useState([]);
-  const [images, setImages] = useState([]);
+  const [media, setMedia] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showEmoji, setShowEmoji] = useState(false);
   const [mentionList, setMentionList] = useState([]);
   const [mentionPos, setMentionPos] = useState(null);
+  const [quote, setQuote] = useState(null);
+  const [signupRequired, setSignupRequired] = useState(false);
+  const [signupDeadline, setSignupDeadline] = useState('');
   const textareaRef = useRef(null);
+
+  useEffect(() => {
+    api.getCategories().then((list) => {
+      if (Array.isArray(list) && list.length) {
+        setCategories(list);
+        setCategory((cur) => (list.some((c) => c.name === cur) ? cur : list[0].name));
+      }
+    }).catch(() => {});
+  }, []);
+
+  // 从帖子卡片「引用」进入时，加载原帖信息
+  useEffect(() => {
+    const qid = searchParams.get('quote');
+    if (qid) {
+      api.getPost(qid).then((d) => {
+        const p = d.post || d;
+        setQuote({ id: Number(qid), content: p.content, nickname: p.nickname, category: p.category });
+      }).catch(() => {});
+    }
+  }, [searchParams]);
 
   if (!user) {
     return (
@@ -30,14 +62,20 @@ export default function CreatePost() {
     );
   }
 
+  const currentCat = categories.find((c) => c.name === category);
+  const isActivity = !!currentCat?.is_activity || category === '活动';
+
   const handleFiles = (e) => {
     const files = Array.from(e.target.files);
-    const remaining = 9 - images.length;
+    const remaining = 9 - media.length;
     files.slice(0, remaining).forEach((file) => {
+      const type = kindOf(file.type);
+      if (!type) return;
       const reader = new FileReader();
-      reader.onload = () => setImages((prev) => [...prev, { url: reader.result, file }]);
+      reader.onload = () => setMedia((prev) => [...prev, { url: reader.result, file, type }]);
       reader.readAsDataURL(file);
     });
+    e.target.value = '';
   };
 
   const addTag = () => {
@@ -48,12 +86,10 @@ export default function CreatePost() {
     }
   };
 
-  // @提及 自动补全
   const handleContentChange = (e) => {
     const val = e.target.value;
     setContent(val);
     const cursor = e.target.selectionStart;
-    // 找到光标前最近的 @
     const before = val.slice(0, cursor);
     const match = before.match(/@([a-zA-Z0-9_\u4e00-\u9fa5]{0,20})$/);
     if (match) {
@@ -99,7 +135,7 @@ export default function CreatePost() {
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!content.trim()) { alert('请输入内容'); return; }
+    if (!content.trim() && media.length === 0) { alert('请输入内容或添加图片/视频/语音'); return; }
     setLoading(true);
     try {
       const fd = new FormData();
@@ -107,7 +143,12 @@ export default function CreatePost() {
       fd.append('content', content);
       fd.append('anonymous', anonymous ? 'true' : 'false');
       fd.append('tags', JSON.stringify(tags));
-      images.forEach((img) => fd.append('images', img.file));
+      media.forEach((m) => fd.append('media', m.file));
+      if (quote) fd.append('quotePostId', String(quote.id));
+      if (isActivity) {
+        fd.append('activitySignupRequired', signupRequired ? 'true' : 'false');
+        if (signupDeadline) fd.append('activitySignupDeadline', signupDeadline);
+      }
       const res = await api.createPost(fd);
       alert(res.message || '发布成功，等待审核');
       navigate('/');
@@ -123,14 +164,24 @@ export default function CreatePost() {
           <div className="form-group">
             <label className="form-label">选择分类</label>
             <div className="cat-tabs" style={{ paddingTop: 0 }}>
-              {CATEGORIES.map((c) => (
+              {categories.map((c) => (
                 <button type="button" key={c.name} className={`cat-tab ${category === c.name ? 'active' : ''}`} onClick={() => setCategory(c.name)}>{c.icon} {c.name}</button>
               ))}
             </div>
           </div>
 
+          {quote && (
+            <div className="quote-card">
+              <div className="quote-head">
+                📎 引用 @{quote.nickname || '同学'} · {quote.category || '帖子'}
+                <button type="button" className="btn-text" onClick={() => setQuote(null)}>取消引用</button>
+              </div>
+              <div className="quote-body">{quote.content?.slice(0, 100) || '（无文字内容）'}</div>
+            </div>
+          )}
+
           <div className="form-group" style={{ position: 'relative' }}>
-            <label className="form-label">内容 <span style={{ color: 'var(--danger)' }}>*</span></label>
+            <label className="form-label">内容</label>
             <textarea
               ref={textareaRef}
               className="form-textarea"
@@ -163,6 +214,22 @@ export default function CreatePost() {
             )}
           </div>
 
+          {isActivity && (
+            <div className="form-group activity-form">
+              <label className="form-label">🎉 活动设置</label>
+              <label className="anon-toggle">
+                <input type="checkbox" checked={signupRequired} onChange={(e) => setSignupRequired(e.target.checked)} />
+                <span>该活动需要报名（用户可在活动帖下点击报名）</span>
+              </label>
+              {signupRequired && (
+                <div style={{ marginTop: 8 }}>
+                  <label className="form-label">报名截止时间（可选）</label>
+                  <input type="datetime-local" className="form-input" value={signupDeadline} onChange={(e) => setSignupDeadline(e.target.value)} />
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="form-group">
             <label className="form-label">标签（最多5个，可选）</label>
             <div style={{ display: 'flex', gap: 6 }}>
@@ -179,21 +246,24 @@ export default function CreatePost() {
           </div>
 
           <div className="form-group">
-            <label className="form-label">图片（最多9张，可选）</label>
+            <label className="form-label">图片 / 视频 / 语音（最多9个，可选）</label>
             <div className="image-preview">
-              {images.map((img, i) => (
+              {media.map((m, i) => (
                 <div className="image-preview-item" key={i}>
-                  <img src={img.url} alt="" />
-                  <button type="button" className="image-preview-remove" onClick={() => setImages(images.filter((_, j) => j !== i))}>×</button>
+                  {m.type === 'image' && <img src={m.url} alt="" />}
+                  {m.type === 'video' && <video src={m.url} muted />}
+                  {m.type === 'audio' && <div className="preview-audio">🎙️ 语音</div>}
+                  <button type="button" className="image-preview-remove" onClick={() => setMedia(media.filter((_, j) => j !== i))}>×</button>
                 </div>
               ))}
-              {images.length < 9 && (
+              {media.length < 9 && (
                 <label className="upload-btn">
-                  <span style={{ fontSize: 24 }}>+</span><span>上传图片</span>
-                  <input type="file" accept="image/*" multiple onChange={handleFiles} style={{ display: 'none' }} />
+                  <span style={{ fontSize: 24 }}>+</span><span>上传媒体</span>
+                  <input type="file" accept="image/*,video/*,audio/*" multiple onChange={handleFiles} style={{ display: 'none' }} />
                 </label>
               )}
             </div>
+            <p className="anon-hint">支持图片、视频与语音（单个文件最大 40MB）</p>
           </div>
 
           <div className="form-group">
