@@ -8,7 +8,14 @@ async function request(url, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...options.headers };
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(BASE + url, { headers, ...options });
+  // GET 请求加时间戳戳绕开任何缓存；所有请求统一 no-store
+  const method = (options.method || 'GET').toUpperCase();
+  let finalUrl = url;
+  if (method === 'GET') {
+    const sep = url.includes('?') ? '&' : '?';
+    finalUrl = `${url}${sep}_t=${Date.now()}`;
+  }
+  const res = await fetch(BASE + finalUrl, { headers, cache: 'no-store', ...options });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '请求失败');
   return data;

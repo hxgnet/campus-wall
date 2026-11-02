@@ -18,6 +18,14 @@ export default {
       newRes.headers.delete('access-control-allow-credentials');
       newRes.headers.delete('access-control-allow-headers');
       newRes.headers.delete('access-control-allow-methods');
+      // API 响应强制不缓存，防止 WebView / CDN 复用旧数据导致帖子不更新
+      if (path.startsWith('/api')) {
+        newRes.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+        newRes.headers.delete('ETag');
+        newRes.headers.delete('Last-Modified');
+        newRes.headers.set('Pragma', 'no-cache');
+        newRes.headers.set('Expires', '0');
+      }
       return newRes;
     }
 

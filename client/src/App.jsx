@@ -16,26 +16,41 @@ import Messages from './pages/Messages.jsx';
 import MessagesHub from './pages/MessagesHub.jsx';
 import GroupChat from './pages/GroupChat.jsx';
 import Apply from './pages/Apply.jsx';
-import { api } from './api.js';
 
 export default function App() {
-  // 版本检测：WebIntoApp 打包的 APK 打开后若服务端已更新，提示刷新以获取最新内容
-  useEffect(() => {
-    const check = async () => {
-      try {
-        const { version } = await api.getVersion();
-        const prev = localStorage.getItem('app_version');
-        if (prev && prev !== version) {
-          localStorage.setItem('app_version', version);
-          if (window.confirm('检测到新版本，是否立即刷新以获取最新内容？')) window.location.reload();
-        } else {
-          localStorage.setItem('app_version', version);
+  // 版本检测：WebIntoApp 打包的 APK 打开后若服务端已更新，自动刷新
+  // 策略：拉取线上 index.html，比对 <script src> 的 hash，变了就强制重载
+  const checkUpdate = async () => {
+    try {
+      const html = await fetch(`/?_t=${Date.now()}`, { cache: 'no-store' }).then((r) => r.text());
+      const match = html.match(/<script[^>]+src="([^"]+)"/);
+      if (match) {
+        const remoteBundle = match[1];
+        const currentBundle = localStorage.getItem('current_bundle');
+        if (!currentBundle) {
+          localStorage.setItem('current_bundle', remoteBundle);
+        } else if (currentBundle !== remoteBundle) {
+          localStorage.setItem('current_bundle', remoteBundle);
+          // 有新版本，直接重载（不弹确认，避免用户在 App 里漏掉）
+          window.location.reload();
         }
-      } catch { /* 忽略网络异常 */ }
+      }
+    } catch { /* 忽略网络异常 */ }
+  };
+
+  useEffect(() => {
+    checkUpdate();
+    // 从后台切回前台时立即检查更新
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') checkUpdate();
     };
-    check();
-    const timer = setInterval(check, 30 * 60 * 1000);
-    return () => clearInterval(timer);
+    document.addEventListener('visibilitychange', onVisible);
+    // 兜底：每 5 分钟检查一次
+    const timer = setInterval(checkUpdate, 5 * 60 * 1000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      clearInterval(timer);
+    };
   }, []);
 
   return (

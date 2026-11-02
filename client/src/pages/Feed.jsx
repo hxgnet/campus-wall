@@ -34,6 +34,16 @@ export default function Feed() {
       .then((d) => setActivities(d.posts || [])).catch(() => {});
   }, []);
 
+  // 回到前台时自动刷新信息流，防止 App 在后台挂久了显示旧帖子
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') loadPosts(true);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+    /* eslint-disable-next-line */
+  }, []);
+
   const onLikeChange = (id, likes) => setPosts((prev) => prev.map((p) => p.id === id ? { ...p, likes } : p));
 
   return (
