@@ -59,7 +59,10 @@ export default function Notifications() {
   return (
     <div className="page">
       <div className="container">
-        <h1 className="page-title">通知</h1>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <h1 className="page-title" style={{ margin: 0 }}>通知</h1>
+          <button className="btn btn-secondary" onClick={() => navigate('/messages')}>💬 私信中心</button>
+        </div>
 
         {requests.length > 0 && (
           <>
@@ -103,10 +106,16 @@ export default function Notifications() {
         {list.length === 0 ? (
           <div className="empty"><div className="empty-icon">🔔</div><div>暂无通知</div></div>
         ) : list.map((n) => (
-          <div key={n.id} className="admin-post" style={{ cursor: (n.type === 'system' || n.type === 'friend_request' || n.post_id || n.type === 'message') ? 'pointer' : 'default' }} onClick={() => openNotification(n)}>
-            <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <div key={n.id} className="admin-post notif-card" style={{ cursor: (n.type === 'system' || n.type === 'friend_request' || n.post_id || n.type === 'message') ? 'pointer' : 'default' }} onClick={() => openNotification(n)}>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
               <span style={{ fontSize: 22 }}>{TYPE_ICON[n.type] || '🔔'}</span>
-              <div style={{ flex: 1 }}>
+              {n.image && (
+                <img src={n.image} alt="" className="notif-image" onClick={(e) => e.stopPropagation()} />
+              )}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {n.badge_text && (
+                  <span className="notif-big-badge" style={{ background: n.badge_color || 'var(--primary)' }}>{n.badge_text}</span>
+                )}
                 <div style={{ fontSize: 14 }}>
                   <strong>{n.type === 'system' ? '系统通知' : (n.from_nickname || n.from_user || '匿名同学')}</strong>
                   {TYPE_TEXT[n.type] && <span> {TYPE_TEXT[n.type]}</span>}

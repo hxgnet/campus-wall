@@ -26,3 +26,20 @@
   from = "/*"
   to = "/index.html"
   status = 200
+
+# 入口 HTML 不缓存，保证 WebIntoApp 打包的 APK 每次打开/刷新都能拿到最新版本
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+
+[[headers]]
+  for = "/*.html"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+
+# 带 hash 的静态资源可以长期缓存
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

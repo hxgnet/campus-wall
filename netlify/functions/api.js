@@ -53172,8 +53172,17 @@ var require_lib6 = __commonJS({
 var require_db3 = __commonJS({
   "server/db.js"(exports2, module2) {
     require_dist4().config();
-    var { Pool, types } = require_lib6();
+    var pg = require_lib6();
+    var { Pool, types } = pg;
     var bcrypt = require_umd();
+    var { AsyncLocalStorage } = require("node:async_hooks");
+    var requestPoolStore = new AsyncLocalStorage();
+    var CFCloudflareSocket = null;
+    try {
+      const cfMod = require_empty();
+      CFCloudflareSocket = cfMod && cfMod.CloudflareSocket || cfMod && cfMod.default && cfMod.default.CloudflareSocket || null;
+    } catch {
+    }
     types.setTypeParser(20, (v) => v === null ? null : parseInt(v, 10));
     var DATABASE_URL = process.env.DATABASE_URL || "";
     var DB_CONFIG_MISSING = !DATABASE_URL;
@@ -53182,9 +53191,12 @@ var require_db3 = __commonJS({
     }
     function buildPoolConfig(rawUrl) {
       const cfg = {
-        max: Number(process.env.PG_POOL_MAX) || 10,
-        idleTimeoutMillis: 3e4,
-        connectionTimeoutMillis: 1e4
+        // Workers 每个 isolate 都有独立连接池，Supabase 免费版连接数有限。
+        // 单 isolate 限制为 2 条连接，空闲 2s 释放，显著降低「连接超时」与复用失效连接的概率。
+        max: Number(process.env.PG_POOL_MAX) || (CFCloudflareSocket ? 2 : 10),
+        idleTimeoutMillis: CFCloudflareSocket ? 2e3 : 3e4,
+        connectionTimeoutMillis: CFCloudflareSocket ? 6e3 : 1e4,
+        keepAlive: true
       };
       try {
         const u = new URL(rawUrl);
@@ -53197,6 +53209,9 @@ var require_db3 = __commonJS({
       } catch {
         cfg.connectionString = rawUrl;
         if (/sslmode=require/i.test(rawUrl)) cfg.ssl = { rejectUnauthorized: false };
+      }
+      if (CFCloudflareSocket) {
+        cfg.stream = () => new CFCloudflareSocket(!!cfg.ssl);
       }
       return cfg;
     }
@@ -53212,7 +53227,25 @@ var require_db3 = __commonJS({
     pool.on("error", (err) => {
       console.error("[db] \u8FDE\u63A5\u6C60\u7A7A\u95F2\u8FDE\u63A5\u9519\u8BEF:", err.message);
     });
+    if (!DB_CONFIG_MISSING) {
+      pool.on("connect", (client) => {
+        client.on("error", (err) => {
+          console.error("[db] \u8FDE\u63A5\u9519\u8BEF:", err && err.message ? err.message : err);
+        });
+      });
+    }
     var LOCAL_NOW = `to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS')`;
+    function createRequestPool() {
+      const p = new Pool(buildPoolConfig(DATABASE_URL));
+      p.on("error", (err) => console.error("[db] \u8BF7\u6C42\u8FDE\u63A5\u6C60\u9519\u8BEF:", err && err.message ? err.message : err));
+      p.on("connect", (client) => {
+        client.on("error", (err) => console.error("[db] \u8FDE\u63A5\u9519\u8BEF:", err && err.message ? err.message : err));
+      });
+      return p;
+    }
+    function activePool() {
+      return requestPoolStore.getStore() || pool;
+    }
     function transformSql(sql) {
       let s = sql;
       s = s.replace(/datetime\s*\(\s*'now'\s*,\s*'localtime'\s*\)/gi, LOCAL_NOW);
@@ -53320,15 +53353,15 @@ var require_db3 = __commonJS({
           const text = convertPlaceholders(transformSql(sql));
           return {
             async get(...args) {
-              const result = await runner(text, normalizeParams(args));
+              const result = await runner(text, normalizeParams(args), { write: false });
               return result.rows[0];
             },
             async all(...args) {
-              const result = await runner(text, normalizeParams(args));
+              const result = await runner(text, normalizeParams(args), { write: false });
               return result.rows;
             },
             async run(...args) {
-              const result = await runner(text, normalizeParams(args));
+              const result = await runner(text, normalizeParams(args), { write: true });
               const row = result.rows && result.rows[0];
               return {
                 lastInsertRowid: row && typeof row.id !== "undefined" ? row.id : void 0,
@@ -53339,12 +53372,57 @@ var require_db3 = __commonJS({
         }
       };
     }
-    var db = createFacade((text, params) => pool.query(text, params));
+    var CONNECT_PHASE_RE = /timeout exceeded when trying to connect|Connection terminated|server closed the connection|socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|Client has encountered a connection error|Cannot use a pool after/i;
+    var TRANSIENT_RE = CONNECT_PHASE_RE;
+    var TRANSIENT_CODES = ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EHOSTUNREACH", "ENETUNREACH", "57P01", "57P02", "57P03"];
+    function isTransient(err, strict) {
+      const msg = String(err && err.message || "");
+      const code = err && err.code;
+      if (TRANSIENT_RE.test(msg) || TRANSIENT_CODES.includes(code)) return true;
+      if (strict) return false;
+      return false;
+    }
+    async function runWithRetry(fn, strict, attempts = 3) {
+      let lastErr;
+      for (let i = 0; i < attempts; i += 1) {
+        try {
+          return await fn();
+        } catch (err) {
+          lastErr = err;
+          if (!isTransient(err, strict) || i === attempts - 1) throw err;
+          await new Promise((resolve) => setTimeout(resolve, 200 * (i + 1)));
+        }
+      }
+      throw lastErr;
+    }
+    var db = createFacade((text, params, opts) => runWithRetry(() => activePool().query(text, params), !!(opts && opts.write)));
     db.pool = pool;
-    db.transaction = async (fn) => {
-      const client = await pool.connect();
+    db.runInRequestContext = async (fn) => {
+      if (!CFCloudflareSocket || DB_CONFIG_MISSING) return fn();
+      const reqPool = createRequestPool();
       try {
-        await client.query("BEGIN");
+        return await requestPoolStore.run(reqPool, fn);
+      } finally {
+        try {
+          await reqPool.end();
+        } catch (e) {
+          console.error("[db] \u5173\u95ED\u8BF7\u6C42\u8FDE\u63A5\u6C60\u5931\u8D25:", e && e.message);
+        }
+      }
+    };
+    db.transaction = async (fn) => {
+      let client;
+      for (let attempt = 0; ; attempt += 1) {
+        client = await runWithRetry(() => activePool().connect(), true);
+        try {
+          await client.query("BEGIN");
+          break;
+        } catch (err) {
+          client.release(true);
+          if (!isTransient(err, true) || attempt >= 2) throw err;
+        }
+      }
+      try {
         const tx = createFacade((text, params) => client.query(text, params));
         const result = await fn(tx);
         await client.query("COMMIT");
@@ -53439,10 +53517,22 @@ var require_db3 = __commonJS({
     post_id INTEGER,
     comment_id INTEGER,
     user_id INTEGER,
+    reported_uid TEXT,
     reason TEXT NOT NULL,
     status TEXT DEFAULT 'pending',
     created_at TEXT NOT NULL DEFAULT ${LOCAL_NOW}
   );
+
+  -- \u7528\u6237\u62C9\u9ED1\u5173\u7CFB\uFF08\u79C1\u4FE1\u573A\u666F\uFF09\uFF1Ablocker \u4E3B\u52A8\u62C9\u9ED1 blocked
+  CREATE TABLE IF NOT EXISTS blocks (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    blocker_uid TEXT NOT NULL,
+    blocked_uid TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT ${LOCAL_NOW},
+    UNIQUE (blocker_uid, blocked_uid)
+  );
+
+  ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_uid TEXT;
 
   CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
@@ -53531,6 +53621,15 @@ var require_db3 = __commonJS({
   ALTER TABLE users ADD COLUMN IF NOT EXISTS tag TEXT;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS grade_set_by_admin BOOLEAN NOT NULL DEFAULT FALSE;
 
+  -- \u660E\u6587\u5BC6\u7801\u7684\u53EF\u9006\u52A0\u5BC6\u5B58\u50A8\uFF08\u4EC5\u8D85\u7EA7\u7BA1\u7406\u5458\u53EF\u67E5\u770B\uFF1B\u5386\u53F2\u8D26\u53F7\u65E0\u6B64\u5B57\u6BB5\u5219\u65E0\u6CD5\u8FD8\u539F\uFF09
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS password_enc TEXT;
+
+  -- \u7528\u6237\u662F\u5426\u516C\u5F00\u81EA\u5DF1\u7684 ID\uFF08\u9ED8\u8BA4\u4E0D\u516C\u5F00\uFF09
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS show_uid BOOLEAN NOT NULL DEFAULT FALSE;
+
+  -- \u7BA1\u7406\u5458/\u8D85\u7BA1\u624B\u52A8\u8BBE\u7F6E\u4E3A\u70ED\u95E8\u5E16
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_hot BOOLEAN NOT NULL DEFAULT FALSE;
+
   -- \u7528\u6237\u5411\u7BA1\u7406\u5458\u63D0\u4EA4\u7684\u56FE\u6587\u7533\u8BF7
   CREATE TABLE IF NOT EXISTS applications (
     id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
@@ -53542,7 +53641,183 @@ var require_db3 = __commonJS({
     created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS'),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+
+  -- ---------- \u677F\u5757\uFF08\u5206\u7C7B\uFF09\u7BA1\u7406 ----------
+  CREATE TABLE IF NOT EXISTS categories (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    icon TEXT NOT NULL DEFAULT '\u{1F4DD}',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    is_activity BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS')
+  );
+
+  -- ---------- \u7BA1\u7406\u5458\u64CD\u4F5C\u5BA1\u8BA1\uFF08\u62D2\u7EDD / \u5220\u9664 / \u5C01\u7981\u7B49\u5747\u7559\u75D5\uFF09 ----------
+  CREATE TABLE IF NOT EXISTS admin_logs (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    admin_role TEXT,
+    admin_name TEXT,
+    action TEXT NOT NULL,
+    target_type TEXT,
+    target_id TEXT,
+    reason TEXT,
+    detail TEXT,
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS')
+  );
+
+  -- \u5E16\u5B50\u5BA1\u6838\u5907\u6CE8\uFF08\u7528\u6237\u53EF\u89C1\u7684\u62D2\u7EDD\u7406\u7531\uFF09
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS review_note TEXT;
+  -- \u5E16\u5B50\u591A\u5A92\u4F53\uFF08JSON: [{type,url}]\uFF0C\u517C\u5BB9\u65E7 images \u5B57\u6BB5\uFF09
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS media TEXT;
+  -- \u5F15\u7528\u5176\u4ED6\u5E16\u5B50
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS quote_post_id INTEGER;
+  -- \u6D3B\u52A8\u662F\u5426\u9700\u8981\u62A5\u540D
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS activity_signup_required BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE posts ADD COLUMN IF NOT EXISTS activity_signup_deadline TEXT;
+
+  CREATE TABLE IF NOT EXISTS activity_signups (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    post_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS'),
+    CONSTRAINT activity_signups_unique UNIQUE (post_id, user_id),
+    FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+  );
+
+  -- \u8BC4\u8BBA\u591A\u5A92\u4F53
+  ALTER TABLE comments ADD COLUMN IF NOT EXISTS media TEXT;
+
+  -- \u4E3E\u62A5\u5904\u7406\u8BE6\u60C5
+  ALTER TABLE reports ADD COLUMN IF NOT EXISTS handle_note TEXT;
+  ALTER TABLE reports ADD COLUMN IF NOT EXISTS handled_by TEXT;
+  ALTER TABLE reports ADD COLUMN IF NOT EXISTS handled_at TEXT;
+
+  -- \u79C1\u4FE1\u591A\u5A92\u4F53\u4E0E\u8F6C\u53D1
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS media TEXT;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS share_type TEXT;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS share_id TEXT;
+
+  -- \u901A\u77E5\u589E\u5F3A\uFF1A\u56FE\u7247\u3001\u5927\u6807\u7B7E
+  ALTER TABLE notifications ADD COLUMN IF NOT EXISTS image TEXT;
+  ALTER TABLE notifications ADD COLUMN IF NOT EXISTS badge_text TEXT;
+  ALTER TABLE notifications ADD COLUMN IF NOT EXISTS badge_color TEXT;
+
+  -- \u7528\u6237\u81EA\u5B9A\u4E49\u6807\u7B7E\u3001\u6807\u7B7E\u989C\u8272\u3001\u91D1\u5E01
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS custom_tag TEXT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS tag_color TEXT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS coins INTEGER NOT NULL DEFAULT 100;
+
+  -- \u7528\u6237\u81EA\u5B9A\u4E49 GIF \u8868\u60C5\u5305
+  CREATE TABLE IF NOT EXISTS user_stickers (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    name TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS'),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  -- \u91D1\u5E01\u8F6C\u8D26\u8BB0\u5F55
+  CREATE TABLE IF NOT EXISTS coin_transfers (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    from_uid TEXT NOT NULL,
+    to_uid TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    note TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS')
+  );
+
+  -- ---------- \u7FA4\u804A ----------
+  CREATE TABLE IF NOT EXISTS chat_groups (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    name TEXT NOT NULL,
+    owner_uid TEXT,
+    avatar TEXT,
+    is_all BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS')
+  );
+
+  CREATE TABLE IF NOT EXISTS chat_group_members (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    group_id INTEGER NOT NULL,
+    user_uid TEXT NOT NULL,
+    role TEXT DEFAULT 'member',
+    last_read_at TEXT,
+    joined_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS'),
+    CONSTRAINT chat_group_members_unique UNIQUE (group_id, user_uid),
+    FOREIGN KEY (group_id) REFERENCES chat_groups(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS group_messages (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    group_id INTEGER NOT NULL,
+    from_uid TEXT NOT NULL,
+    content TEXT DEFAULT '',
+    media TEXT,
+    share_type TEXT,
+    share_id TEXT,
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS'),
+    FOREIGN KEY (group_id) REFERENCES chat_groups(id) ON DELETE CASCADE
+  );
+
+  -- \u7FA4\u7EA2\u5305
+  CREATE TABLE IF NOT EXISTS red_packets (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    group_id INTEGER NOT NULL,
+    sender_uid TEXT NOT NULL,
+    note TEXT DEFAULT '\u606D\u559C\u53D1\u8D22\uFF0C\u5927\u5409\u5927\u5229',
+    total INTEGER NOT NULL,
+    remaining INTEGER NOT NULL,
+    count INTEGER NOT NULL,
+    remaining_count INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS'),
+    FOREIGN KEY (group_id) REFERENCES chat_groups(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS red_packet_claims (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    packet_id INTEGER NOT NULL,
+    claimer_uid TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS'),
+    CONSTRAINT red_packet_claims_unique UNIQUE (packet_id, claimer_uid),
+    FOREIGN KEY (packet_id) REFERENCES red_packets(id) ON DELETE CASCADE
+  );
+
+  -- \u5E16\u5B50\u6D4F\u89C8\u8BB0\u5F55\uFF08\u8D85\u7EA7\u7BA1\u7406\u5458\u53EF\u67E5\u770B\u8C01\u770B\u8FC7\u3001\u770B\u4E86\u51E0\u6B21\uFF09
+  CREATE TABLE IF NOT EXISTS post_views (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    post_id INTEGER NOT NULL,
+    viewer_uid TEXT NOT NULL,
+    view_count INTEGER NOT NULL DEFAULT 1,
+    last_viewed_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS'),
+    CONSTRAINT post_views_unique UNIQUE (post_id, viewer_uid),
+    FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+  );
+
+  -- \u6CE8\u9500\u7533\u8BF7\uFF08\u9700\u4E0A\u4F20\u667A\u5B66\u7F51\u5377\u5B50\u56FE\u7247\u5E76\u7531\u8D85\u7BA1\u5BA1\u6279\uFF09
+  CREATE TABLE IF NOT EXISTS deletion_requests (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    images TEXT,
+    note TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    admin_note TEXT,
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS'),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
 `;
+    var DEFAULT_CATEGORIES = [
+      ["\u8868\u767D\u5899", "\u{1F495}", 10, false],
+      ["\u5931\u7269\u62DB\u9886", "\u{1F50D}", 20, false],
+      ["\u4E8C\u624B\u4EA4\u6613", "\u{1F6D2}", 30, false],
+      ["\u5410\u69FD", "\u{1F4AC}", 40, false],
+      ["\u95EE\u7B54", "\u2753", 50, false],
+      ["\u6C42\u52A9", "\u{1F198}", 60, false],
+      ["\u6D3B\u52A8", "\u{1F389}", 70, true],
+      ["\u5176\u4ED6", "\u{1F4DD}", 80, false]
+    ];
+    var ALL_GROUP_NAME = "\u5168\u4F53\u6210\u5458\u7FA4\u804A";
     function genUid() {
       const ts = Date.now().toString(16).padStart(12, "0");
       const rand = Math.floor(Math.random() * 65536).toString(16).padStart(4, "0");
@@ -53579,9 +53854,44 @@ var require_db3 = __commonJS({
       }
       console.log("[db] \u5DF2\u5199\u5165\u79CD\u5B50\u6570\u636E\uFF08xiaoming / xiaohong\uFF0C\u5BC6\u7801 123456\uFF0C\u542B\u793A\u4F8B\u5E16\u5B50\uFF09");
     }
+    async function seedExtras() {
+      for (const [name, icon, sortOrder, isActivity] of DEFAULT_CATEGORIES) {
+        await pool.query(
+          `INSERT INTO categories (name, icon, sort_order, is_activity) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (name) DO NOTHING`,
+          [name, icon, sortOrder, isActivity]
+        );
+      }
+      const { rows: dismissed } = await pool.query(`SELECT name FROM categories_dismissed`);
+      if (dismissed.length > 0) {
+        const names = dismissed.map((r) => r.name);
+        await pool.query(`DELETE FROM categories WHERE name = ANY($1)`, [names]);
+      }
+      const { rows: groups } = await pool.query(`SELECT id FROM chat_groups WHERE is_all = TRUE ORDER BY id LIMIT 1`);
+      let groupId = groups[0]?.id;
+      if (!groupId) {
+        const r = await pool.query(
+          `INSERT INTO chat_groups (name, owner_uid, is_all) VALUES ($1, 'system', TRUE) RETURNING id`,
+          [ALL_GROUP_NAME]
+        );
+        groupId = r.rows[0].id;
+      }
+      await pool.query(
+        `INSERT INTO chat_group_members (group_id, user_uid, role)
+     SELECT $1, uid, 'member' FROM users
+     ON CONFLICT (group_id, user_uid) DO NOTHING`,
+        [groupId]
+      );
+      await pool.query(`UPDATE users SET coins = 100 WHERE coins IS NULL`);
+    }
     async function init() {
       await pool.query(DDL);
       await pool.query(MIGRATIONS);
+      await pool.query(`CREATE TABLE IF NOT EXISTS categories_dismissed (
+    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS')
+  )`);
       await pool.query(
         `UPDATE users SET uid = lpad(to_hex((extract(epoch from created_at::timestamp) * 1000)::bigint + id), 16, '0')
      WHERE uid IS NULL OR uid = ''`
@@ -53589,6 +53899,7 @@ var require_db3 = __commonJS({
       await pool.query("ALTER TABLE users ALTER COLUMN uid SET NOT NULL");
       await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS users_uid_unique ON users (uid)");
       await seed();
+      await seedExtras().catch((e) => console.error("[db] \u6269\u5C55\u79CD\u5B50\u6570\u636E\u5931\u8D25:", e.message));
       const host = (() => {
         try {
           return new URL(DATABASE_URL).host;
@@ -53714,10 +54025,17 @@ var require_storage = __commonJS({
       ".bmp": "image/bmp",
       ".svg": "image/svg+xml"
     };
-    function contentType(filePath) {
-      return MIME[path.extname(filePath).toLowerCase()] || "application/octet-stream";
+    function contentType(file) {
+      if (file && file.mimetype) return file.mimetype;
+      if (file && file.originalname) return MIME[path.extname(file.originalname).toLowerCase()] || "application/octet-stream";
+      return "application/octet-stream";
     }
-    async function uploadSupabase(localPath, key) {
+    function fileBuffer(file) {
+      if (file && file.buffer) return file.buffer;
+      if (typeof file === "string") return fs.readFileSync(file);
+      return file;
+    }
+    async function uploadSupabase(file, key) {
       const base = config.supabase.url.replace(/\/+$/, "");
       const objectPath = key.split("/").map(encodeURIComponent).join("/");
       const res = await fetch(`${base}/storage/v1/object/${config.supabase.bucket}/${objectPath}`, {
@@ -53725,10 +54043,10 @@ var require_storage = __commonJS({
         headers: {
           apikey: config.supabase.serviceKey,
           Authorization: `Bearer ${config.supabase.serviceKey}`,
-          "Content-Type": contentType(localPath),
+          "Content-Type": contentType(file),
           "x-upsert": "true"
         },
-        body: fs.readFileSync(localPath)
+        body: fileBuffer(file)
       });
       if (!res.ok) {
         const text = await res.text();
@@ -53736,13 +54054,15 @@ var require_storage = __commonJS({
       }
       return `${base}/storage/v1/object/public/${config.supabase.bucket}/${objectPath}`;
     }
-    async function saveFile(localPath, key) {
+    async function saveFile(file, key) {
       if (provider === "supabase") {
-        const url = await uploadSupabase(localPath, key);
-        if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
-        return url;
+        return await uploadSupabase(file, key);
       }
-      return "/uploads/" + path.basename(localPath);
+      const buf = fileBuffer(file);
+      const filename = path.basename(key);
+      const target = path.join(config.uploadsDir || "/tmp/uploads", filename);
+      fs.writeFileSync(target, buf);
+      return "/uploads/" + filename;
     }
     async function deleteByUrl(url, uploadsDir) {
       try {
@@ -53781,6 +54101,687 @@ var require_storage = __commonJS({
   }
 });
 
+// server/features.js
+var require_features = __commonJS({
+  "server/features.js"(exports2, module2) {
+    var express = require_express2();
+    module2.exports.register = function register(ctx) {
+      const {
+        app: app2,
+        db,
+        auth,
+        adminAuth,
+        superAuth,
+        mediaUpload,
+        upload,
+        fileStorage,
+        uploadsDir,
+        notify,
+        NOW_TEXT,
+        logAdminAction,
+        parseMedia,
+        mediaKind
+      } = ctx;
+      const router = express.Router();
+      const BOOT_AT = process.env.DEPLOY_ID || process.env.VERCEL_GIT_COMMIT_SHA || process.env.NETLIFY_DEPLOY_ID || process.env.COMMIT_REF || `local-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}`;
+      router.get("/version", (req, res) => {
+        res.json({ version: BOOT_AT, time: (/* @__PURE__ */ new Date()).toISOString() });
+      });
+      router.post("/posts/:id/signup", auth, async (req, res) => {
+        const post = await db.prepare(
+          `SELECT id, category, activity_signup_required, activity_signup_deadline, status FROM posts WHERE id = ?`
+        ).get(req.params.id);
+        if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
+        if (!post.activity_signup_required) return res.status(400).json({ error: "\u8BE5\u6D3B\u52A8\u65E0\u9700\u62A5\u540D" });
+        if (post.status !== "approved") return res.status(400).json({ error: "\u6D3B\u52A8\u5C1A\u672A\u901A\u8FC7\u5BA1\u6838" });
+        if (post.activity_signup_deadline && new Date(post.activity_signup_deadline.replace(" ", "T")) < /* @__PURE__ */ new Date()) {
+          return res.status(400).json({ error: "\u62A5\u540D\u5DF2\u622A\u6B62" });
+        }
+        await db.prepare(
+          `INSERT INTO activity_signups (post_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING`
+        ).run(post.id, req.user.dbId);
+        const count = (await db.prepare(`SELECT COUNT(*) AS c FROM activity_signups WHERE post_id = ?`).get(post.id)).c;
+        res.json({ ok: true, signedUp: true, count });
+      });
+      router.delete("/posts/:id/signup", auth, async (req, res) => {
+        await db.prepare(`DELETE FROM activity_signups WHERE post_id = ? AND user_id = ?`).run(req.params.id, req.user.dbId);
+        const count = (await db.prepare(`SELECT COUNT(*) AS c FROM activity_signups WHERE post_id = ?`).get(req.params.id)).c;
+        res.json({ ok: true, signedUp: false, count });
+      });
+      router.get("/categories", async (req, res) => {
+        const list = await db.prepare(
+          `SELECT id, name, icon, sort_order, is_activity FROM categories ORDER BY sort_order, id`
+        ).all();
+        res.json(list);
+      });
+      router.post("/upload/media", auth, mediaUpload.array("files", 9), async (req, res) => {
+        const files = req.files || [];
+        const media = [];
+        try {
+          for (const f of files) {
+            media.push({
+              type: mediaKind(f.mimetype),
+              url: await fileStorage.saveFile(
+                f,
+                `media/${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${f.originalname}`
+              )
+            });
+          }
+        } catch (e) {
+          console.error("[upload] \u5A92\u4F53\u4FDD\u5B58\u5931\u8D25:", e.message);
+          return res.status(500).json({ error: "\u5A92\u4F53\u4E0A\u4F20\u5931\u8D25" });
+        }
+        res.json({ files: media, url: media[0] ? media[0].url : null, type: media[0] ? media[0].type : null });
+      });
+      router.post("/admin/upload", superAuth, mediaUpload.single("file"), async (req, res) => {
+        if (!req.file) return res.status(400).json({ error: "\u8BF7\u9009\u62E9\u56FE\u7247" });
+        if (!/^image\//.test(req.file.mimetype)) return res.status(400).json({ error: "\u53EA\u5141\u8BB8\u4E0A\u4F20\u56FE\u7247" });
+        const url = await fileStorage.saveFile(
+          req.file,
+          `notices/${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${req.file.originalname}`
+        );
+        res.json({ url, type: "image" });
+      });
+      router.get("/stickers", auth, async (req, res) => {
+        const list = await db.prepare(
+          `SELECT id, url, name, created_at FROM user_stickers WHERE user_id = ? ORDER BY id DESC`
+        ).all(req.user.dbId);
+        res.json(list);
+      });
+      router.post("/stickers", auth, async (req, res) => {
+        const url = String(req.body.url || "").trim();
+        const name = String(req.body.name || "").slice(0, 30);
+        if (!url || !url.startsWith("/uploads/") && !/^https?:\/\//.test(url)) {
+          return res.status(400).json({ error: "\u8868\u60C5\u5305\u5730\u5740\u65E0\u6548" });
+        }
+        const count = (await db.prepare(`SELECT COUNT(*) AS c FROM user_stickers WHERE user_id = ?`).get(req.user.dbId)).c;
+        if (count >= 60) return res.status(400).json({ error: "\u8868\u60C5\u5305\u6700\u591A\u4FDD\u5B58 60 \u4E2A" });
+        const r = await db.prepare(
+          `INSERT INTO user_stickers (user_id, url, name) VALUES (?, ?, ?) RETURNING id`
+        ).run(req.user.dbId, url, name);
+        res.json({ id: r.lastInsertRowid });
+      });
+      router.delete("/stickers/:id", auth, async (req, res) => {
+        await db.prepare(`DELETE FROM user_stickers WHERE id = ? AND user_id = ?`).run(req.params.id, req.user.dbId);
+        res.json({ ok: true });
+      });
+      router.get("/coins", auth, async (req, res) => {
+        const me = await db.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId);
+        const sent = await db.prepare(
+          `SELECT t.*, (SELECT nickname FROM users WHERE uid = t.to_uid) AS peer_nickname
+       FROM coin_transfers t WHERE t.from_uid = ? ORDER BY t.id DESC LIMIT 50`
+        ).all(req.user.uid);
+        const received = await db.prepare(
+          `SELECT t.*, (SELECT nickname FROM users WHERE uid = t.from_uid) AS peer_nickname
+       FROM coin_transfers t WHERE t.to_uid = ? ORDER BY t.id DESC LIMIT 50`
+        ).all(req.user.uid);
+        res.json({ coins: me ? me.coins : 0, sent, received });
+      });
+      router.post("/coins/transfer", auth, async (req, res) => {
+        const to = String(req.body.to || "").trim();
+        const amount = Number(req.body.amount);
+        const note = String(req.body.note || "").slice(0, 60);
+        if (!to) return res.status(400).json({ error: "\u8BF7\u9009\u62E9\u6536\u6B3E\u7528\u6237" });
+        if (!Number.isInteger(amount) || amount <= 0 || amount > 1e5) {
+          return res.status(400).json({ error: "\u8F6C\u8D26\u91D1\u989D\u5FC5\u987B\u4E3A 1-100000 \u7684\u6574\u6570" });
+        }
+        if (to === req.user.uid) return res.status(400).json({ error: "\u4E0D\u80FD\u7ED9\u81EA\u5DF1\u8F6C\u8D26" });
+        const peer = await db.prepare(`SELECT id, uid, nickname FROM users WHERE uid = ?`).get(to);
+        if (!peer) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
+        const me = await db.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId);
+        if (!me || Number(me.coins) < amount) return res.status(400).json({ error: "\u91D1\u5E01\u4E0D\u8DB3" });
+        let balance = 0;
+        await db.transaction(async (tx) => {
+          await tx.prepare(`UPDATE users SET coins = coins - ? WHERE id = ?`).run(amount, req.user.dbId);
+          await tx.prepare(`UPDATE users SET coins = coins + ? WHERE id = ?`).run(amount, peer.id);
+          await tx.prepare(
+            `INSERT INTO coin_transfers (from_uid, to_uid, amount, note) VALUES (?, ?, ?, ?) RETURNING id`
+          ).run(req.user.uid, peer.uid, amount, note);
+          balance = (await tx.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId)).coins;
+        });
+        await notify(peer.id, "system", req.user.uid, null, `\u6536\u5230 ${amount} \u91D1\u5E01\u8F6C\u8D26${note ? `\uFF1A${note}` : ""}`);
+        res.json({ ok: true, coins: balance });
+      });
+      async function ensureAllGroupMember(uid) {
+        try {
+          await db.prepare(
+            `INSERT INTO chat_group_members (group_id, user_uid, role)
+         SELECT id, ?, 'member' FROM chat_groups WHERE is_all = TRUE ON CONFLICT DO NOTHING`
+          ).run(uid);
+        } catch (e) {
+          console.error("[group] \u81EA\u52A8\u52A0\u5165\u5168\u4F53\u7FA4\u5931\u8D25:", e.message);
+        }
+      }
+      async function assertMember(groupId, uid) {
+        const member = await db.prepare(
+          `SELECT role FROM chat_group_members WHERE group_id = ? AND user_uid = ?`
+        ).get(groupId, uid);
+        return member;
+      }
+      router.get("/groups", auth, async (req, res) => {
+        await ensureAllGroupMember(req.user.uid);
+        const list = await db.prepare(
+          `SELECT g.id, g.name, g.avatar, g.is_all, g.owner_uid, g.created_at,
+              (SELECT COUNT(*) FROM chat_group_members cm2 WHERE cm2.group_id = g.id) AS member_count,
+              (SELECT gm.content FROM group_messages gm WHERE gm.group_id = g.id ORDER BY gm.id DESC LIMIT 1) AS last_content,
+              (SELECT gm.share_type FROM group_messages gm WHERE gm.group_id = g.id ORDER BY gm.id DESC LIMIT 1) AS last_share_type,
+              (SELECT gm.media FROM group_messages gm WHERE gm.group_id = g.id ORDER BY gm.id DESC LIMIT 1) AS last_media,
+              (SELECT gm.created_at FROM group_messages gm WHERE gm.group_id = g.id ORDER BY gm.id DESC LIMIT 1) AS last_time,
+              (SELECT COUNT(*) FROM group_messages gm WHERE gm.group_id = g.id
+                 AND gm.created_at > COALESCE(m.last_read_at, '1970-01-01 00:00:00')
+                 AND gm.from_uid <> ?) AS unread
+       FROM chat_groups g JOIN chat_group_members m ON m.group_id = g.id AND m.user_uid = ?
+       ORDER BY g.is_all DESC, g.id ASC`
+        ).all(req.user.uid, req.user.uid);
+        res.json(list);
+      });
+      router.post("/groups", auth, async (req, res) => {
+        const name = String(req.body.name || "").trim();
+        if (name.length < 1 || name.length > 30) return res.status(400).json({ error: "\u7FA4\u540D\u79F0\u9700 1-30 \u4E2A\u5B57\u7B26" });
+        const memberUids = Array.isArray(req.body.memberUids) ? [...new Set(req.body.memberUids.filter((u) => typeof u === "string" && u && u !== req.user.uid))].slice(0, 50) : [];
+        let groupId = null;
+        await db.transaction(async (tx) => {
+          const g = await tx.prepare(
+            `INSERT INTO chat_groups (name, owner_uid) VALUES (?, ?) RETURNING id`
+          ).run(name, req.user.uid);
+          groupId = g.lastInsertRowid;
+          await tx.prepare(
+            `INSERT INTO chat_group_members (group_id, user_uid, role) VALUES (?, ?, 'owner') ON CONFLICT DO NOTHING`
+          ).run(groupId, req.user.uid);
+          for (const uid of memberUids) {
+            const u = await tx.prepare(`SELECT id FROM users WHERE uid = ?`).get(uid);
+            if (u) {
+              await tx.prepare(
+                `INSERT INTO chat_group_members (group_id, user_uid, role) VALUES (?, ?, 'member') ON CONFLICT DO NOTHING`
+              ).run(groupId, uid);
+            }
+          }
+        });
+        res.json({ id: groupId });
+      });
+      router.get("/groups/:id", auth, async (req, res) => {
+        const group = await db.prepare(
+          `SELECT id, name, avatar, is_all, owner_uid, created_at FROM chat_groups WHERE id = ?`
+        ).get(req.params.id);
+        if (!group) return res.status(404).json({ error: "\u7FA4\u804A\u4E0D\u5B58\u5728" });
+        const members = await db.prepare(
+          `SELECT m.user_uid AS uid, m.role, m.joined_at, u.nickname, u.avatar, u.username
+       FROM chat_group_members m LEFT JOIN users u ON u.uid = m.user_uid
+       WHERE m.group_id = ? ORDER BY (m.role = 'owner') DESC, m.id ASC`
+        ).all(req.params.id);
+        const isMember = members.some((m) => m.uid === req.user.uid);
+        res.json({ group, members, isMember });
+      });
+      router.post("/groups/:id/join", auth, async (req, res) => {
+        const group = await db.prepare(`SELECT id FROM chat_groups WHERE id = ?`).get(req.params.id);
+        if (!group) return res.status(404).json({ error: "\u7FA4\u804A\u4E0D\u5B58\u5728" });
+        await db.prepare(
+          `INSERT INTO chat_group_members (group_id, user_uid, role) VALUES (?, ?, 'member') ON CONFLICT DO NOTHING`
+        ).run(req.params.id, req.user.uid);
+        res.json({ ok: true });
+      });
+      router.post("/groups/:id/leave", auth, async (req, res) => {
+        const group = await db.prepare(`SELECT id, is_all FROM chat_groups WHERE id = ?`).get(req.params.id);
+        if (!group) return res.status(404).json({ error: "\u7FA4\u804A\u4E0D\u5B58\u5728" });
+        if (group.is_all) return res.status(400).json({ error: "\u4E0D\u80FD\u9000\u51FA\u5168\u4F53\u6210\u5458\u7FA4\u804A" });
+        await db.prepare(`DELETE FROM chat_group_members WHERE group_id = ? AND user_uid = ?`).run(req.params.id, req.user.uid);
+        res.json({ ok: true });
+      });
+      router.post("/groups/:id/read", auth, async (req, res) => {
+        await db.prepare(
+          `UPDATE chat_group_members SET last_read_at = ${NOW_TEXT} WHERE group_id = ? AND user_uid = ?`
+        ).run(req.params.id, req.user.uid);
+        res.json({ ok: true });
+      });
+      async function attachShares(list, viewerUid) {
+        const packetIds = list.filter((m) => m.share_type === "redpacket" && m.share_id).map((m) => Number(m.share_id));
+        const packetMap = /* @__PURE__ */ new Map();
+        if (packetIds.length) {
+          const packets = await db.prepare(
+            `SELECT * FROM red_packets WHERE id IN (${packetIds.map(() => "?").join(",")})`
+          ).all(...packetIds);
+          const claims = await db.prepare(
+            `SELECT * FROM red_packet_claims WHERE claimer_uid = ? AND packet_id IN (${packetIds.map(() => "?").join(",")})`
+          ).all(viewerUid, ...packetIds);
+          const mine = new Map(claims.map((c) => [c.packet_id, c.amount]));
+          for (const p of packets) {
+            packetMap.set(p.id, {
+              id: p.id,
+              note: p.note,
+              total: p.total,
+              remaining: p.remaining,
+              count: p.count,
+              remaining_count: p.remaining_count,
+              sender_uid: p.sender_uid,
+              my_amount: mine.has(p.id) ? mine.get(p.id) : null
+            });
+          }
+        }
+        const postIds = list.filter((m) => m.share_type === "post" && m.share_id).map((m) => Number(m.share_id));
+        const postMap = /* @__PURE__ */ new Map();
+        if (postIds.length) {
+          const posts = await db.prepare(
+            `SELECT id, content, category, nickname FROM posts WHERE id IN (${postIds.map(() => "?").join(",")})`
+          ).all(...postIds);
+          posts.forEach((p) => postMap.set(p.id, p));
+        }
+        const profileUids = list.filter((m) => m.share_type === "profile" && m.share_id).map((m) => m.share_id);
+        const profileMap = /* @__PURE__ */ new Map();
+        if (profileUids.length) {
+          const users = await db.prepare(
+            `SELECT uid, nickname, avatar FROM users WHERE uid IN (${profileUids.map(() => "?").join(",")})`
+          ).all(...profileUids);
+          users.forEach((u) => profileMap.set(u.uid, u));
+        }
+        list.forEach((m) => {
+          m.media = parseMedia(m.media);
+          if (m.share_type === "redpacket") {
+            m.share = { type: "redpacket", packet: packetMap.get(Number(m.share_id)) || null };
+          } else if (m.share_type === "post") {
+            const p = postMap.get(Number(m.share_id));
+            m.share = { type: "post", id: Number(m.share_id), post: p || null };
+          } else if (m.share_type === "profile") {
+            const u = profileMap.get(m.share_id);
+            m.share = { type: "profile", id: m.share_id, user: u || null };
+          }
+        });
+      }
+      router.get("/groups/:id/messages", auth, async (req, res) => {
+        const member = await assertMember(req.params.id, req.user.uid);
+        if (!member) return res.status(403).json({ error: "\u4F60\u4E0D\u5728\u8BE5\u7FA4\u804A\u4E2D" });
+        await db.prepare(
+          `UPDATE chat_group_members SET last_read_at = ${NOW_TEXT} WHERE group_id = ? AND user_uid = ?`
+        ).run(req.params.id, req.user.uid);
+        const list = await db.prepare(
+          `SELECT gm.id, gm.group_id, gm.from_uid, gm.content, gm.media, gm.share_type, gm.share_id, gm.created_at,
+              u.nickname, u.avatar, u.custom_tag, u.tag_color
+       FROM group_messages gm LEFT JOIN users u ON u.uid = gm.from_uid
+       WHERE gm.group_id = ? ORDER BY gm.id ASC LIMIT 500`
+        ).all(req.params.id);
+        await attachShares(list, req.user.uid);
+        res.json(list);
+      });
+      router.post("/groups/:id/messages", auth, async (req, res) => {
+        const member = await assertMember(req.params.id, req.user.uid);
+        if (!member) return res.status(403).json({ error: "\u4F60\u4E0D\u5728\u8BE5\u7FA4\u804A\u4E2D" });
+        const content = String(req.body.content || "").trim();
+        const media = parseMedia(req.body.media);
+        const shareType = req.body.shareType ? String(req.body.shareType) : null;
+        const shareId = req.body.shareId ? String(req.body.shareId) : null;
+        if (!content && media.length === 0 && !(shareType && shareId)) {
+          return res.status(400).json({ error: "\u6D88\u606F\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A" });
+        }
+        if (content.length > 2e3) return res.status(400).json({ error: "\u6D88\u606F\u4E0D\u80FD\u8D85\u8FC7 2000 \u5B57" });
+        const r = await db.prepare(
+          `INSERT INTO group_messages (group_id, from_uid, content, media, share_type, share_id)
+       VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+        ).run(req.params.id, req.user.uid, content, JSON.stringify(media), shareType, shareId);
+        res.json({ id: r.lastInsertRowid });
+      });
+      router.post("/groups/:id/redpacket", auth, async (req, res) => {
+        const member = await assertMember(req.params.id, req.user.uid);
+        if (!member) return res.status(403).json({ error: "\u4F60\u4E0D\u5728\u8BE5\u7FA4\u804A\u4E2D" });
+        const total = Number(req.body.total);
+        const count = Number(req.body.count);
+        const note = String(req.body.note || "\u606D\u559C\u53D1\u8D22\uFF0C\u5927\u5409\u5927\u5229").slice(0, 60);
+        if (!Number.isInteger(total) || total <= 0 || total > 1e5) {
+          return res.status(400).json({ error: "\u7EA2\u5305\u603B\u91D1\u5E01\u9700\u4E3A 1-100000 \u7684\u6574\u6570" });
+        }
+        if (!Number.isInteger(count) || count <= 0 || count > 100 || count > total) {
+          return res.status(400).json({ error: "\u7EA2\u5305\u4E2A\u6570\u9700\u4E3A 1-100 \u4E14\u4E0D\u8D85\u8FC7\u603B\u91D1\u5E01" });
+        }
+        const me = await db.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId);
+        if (!me || Number(me.coins) < total) return res.status(400).json({ error: "\u91D1\u5E01\u4E0D\u8DB3" });
+        let packetId = null;
+        let messageId = null;
+        let balance = 0;
+        await db.transaction(async (tx) => {
+          await tx.prepare(`UPDATE users SET coins = coins - ? WHERE id = ?`).run(total, req.user.dbId);
+          const p = await tx.prepare(
+            `INSERT INTO red_packets (group_id, sender_uid, note, total, remaining, count, remaining_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
+          ).run(req.params.id, req.user.uid, note, total, total, count, count);
+          packetId = p.lastInsertRowid;
+          const m = await tx.prepare(
+            `INSERT INTO group_messages (group_id, from_uid, content, share_type, share_id)
+         VALUES (?, ?, ?, 'redpacket', ?) RETURNING id`
+          ).run(req.params.id, req.user.uid, `[\u7EA2\u5305] ${note}`, packetId);
+          messageId = m.lastInsertRowid;
+          balance = (await tx.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId)).coins;
+        });
+        res.json({ id: packetId, messageId, coins: balance });
+      });
+      router.post("/redpackets/:id/claim", auth, async (req, res) => {
+        const packet = await db.prepare(`SELECT * FROM red_packets WHERE id = ?`).get(req.params.id);
+        if (!packet) return res.status(404).json({ error: "\u7EA2\u5305\u4E0D\u5B58\u5728" });
+        const member = await assertMember(packet.group_id, req.user.uid);
+        if (!member) return res.status(403).json({ error: "\u4F60\u4E0D\u5728\u8BE5\u7FA4\u804A\u4E2D" });
+        const existing = await db.prepare(
+          `SELECT amount FROM red_packet_claims WHERE packet_id = ? AND claimer_uid = ?`
+        ).get(packet.id, req.user.uid);
+        if (existing) {
+          const coins2 = (await db.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId)).coins;
+          return res.json({ ok: true, amount: existing.amount, already: true, coins: coins2 });
+        }
+        if (Number(packet.remaining_count) <= 0 || Number(packet.remaining) <= 0) {
+          return res.status(400).json({ error: "\u7EA2\u5305\u5DF2\u88AB\u62A2\u5149" });
+        }
+        const remainingCount = Number(packet.remaining_count);
+        const remaining = Number(packet.remaining);
+        let amount = Math.floor(remaining / remainingCount);
+        if (remainingCount > 1 && remaining > amount * remainingCount) {
+          amount += Math.floor(Math.random() * (remaining - amount * remainingCount + 1));
+        }
+        amount = Math.max(1, Math.min(amount, remaining - (remainingCount - 1)));
+        let coins = 0;
+        await db.transaction(async (tx) => {
+          await tx.prepare(
+            `UPDATE red_packets SET remaining = remaining - ?, remaining_count = remaining_count - 1 WHERE id = ?`
+          ).run(amount, packet.id);
+          await tx.prepare(
+            `INSERT INTO red_packet_claims (packet_id, claimer_uid, amount) VALUES (?, ?, ?) RETURNING id`
+          ).run(packet.id, req.user.uid, amount);
+          await tx.prepare(`UPDATE users SET coins = coins + ? WHERE id = ?`).run(amount, req.user.dbId);
+          coins = (await tx.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId)).coins;
+        });
+        const sender = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(packet.sender_uid);
+        if (sender) await notify(sender.id, "system", req.user.uid, null, `\u6709\u4EBA\u9886\u53D6\u4E86\u4F60\u7684\u7EA2\u5305\uFF08${amount} \u91D1\u5E01\uFF09`);
+        res.json({ ok: true, amount, already: false, coins });
+      });
+      router.get("/groups/:id/redpackets", auth, async (req, res) => {
+        const packets = await db.prepare(
+          `SELECT p.*, (SELECT COUNT(*) FROM red_packet_claims c WHERE c.packet_id = p.id) AS claimed_count,
+              (SELECT amount FROM red_packet_claims c WHERE c.packet_id = p.id AND c.claimer_uid = ?) AS my_amount
+       FROM red_packets p WHERE p.group_id = ? ORDER BY p.id DESC LIMIT 30`
+        ).all(req.user.uid, req.params.id);
+        res.json(packets);
+      });
+      async function saveDeletionImages(files) {
+        const urls = [];
+        for (const f of files || []) {
+          urls.push(await fileStorage.saveFile(
+            f,
+            `deletion/${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${f.originalname}`
+          ));
+        }
+        return urls;
+      }
+      router.post("/auth/account/request", auth, mediaUpload.array("images", 3), async (req, res) => {
+        const files = req.files || [];
+        if (files.length === 0) return res.status(400).json({ error: "\u8BF7\u4E0A\u4F20\u4E00\u5F20\u667A\u5B66\u7F51\u5377\u5B50\u56FE\u7247" });
+        if (files.some((f) => !/^image\//.test(f.mimetype))) return res.status(400).json({ error: "\u53EA\u5141\u8BB8\u4E0A\u4F20\u56FE\u7247" });
+        const note = String(req.body.note || "").slice(0, 500);
+        const images = await saveDeletionImages(files);
+        const pending = await db.prepare(
+          `SELECT id FROM deletion_requests WHERE user_id = ? AND status = 'pending'`
+        ).get(req.user.dbId);
+        if (pending) {
+          await db.prepare(`UPDATE deletion_requests SET images = ?, note = ? WHERE id = ?`).run(JSON.stringify(images), note, pending.id);
+          return res.json({ id: pending.id, updated: true });
+        }
+        const r = await db.prepare(
+          `INSERT INTO deletion_requests (user_id, images, note) VALUES (?, ?, ?) RETURNING id`
+        ).run(req.user.dbId, JSON.stringify(images), note);
+        res.json({ id: r.lastInsertRowid });
+      });
+      router.get("/auth/account/request", auth, async (req, res) => {
+        const rows = await db.prepare(
+          `SELECT id, images, note, status, admin_note, created_at FROM deletion_requests
+       WHERE user_id = ? ORDER BY id DESC LIMIT 5`
+        ).all(req.user.dbId);
+        rows.forEach((r) => {
+          r.images = r.images ? JSON.parse(r.images) : [];
+        });
+        res.json(rows);
+      });
+      router.get("/admin/deletion-requests", superAuth, async (req, res) => {
+        const status = String(req.query.status || "pending");
+        const where = status === "all" ? "" : "WHERE d.status = ?";
+        const params = status === "all" ? [] : [status];
+        const rows = await db.prepare(
+          `SELECT d.*, u.uid, u.username, u.nickname, u.avatar, u.real_name, u.class_name,
+              u.grade, u.tag, u.reputation, u.banned
+       FROM deletion_requests d JOIN users u ON u.id = d.user_id
+       ${where} ORDER BY d.id DESC LIMIT 100`
+        ).all(...params);
+        rows.forEach((r) => {
+          r.images = r.images ? JSON.parse(r.images) : [];
+        });
+        res.json(rows);
+      });
+      async function deleteUserAccount(userId, uid) {
+        await db.transaction(async (tx) => {
+          await tx.prepare(`DELETE FROM notifications WHERE user_id = ?`).run(userId);
+          await tx.prepare(`DELETE FROM follows WHERE follower_id = ? OR following_id = ?`).run(userId, userId);
+          await tx.prepare(`DELETE FROM friends WHERE requester_uid = ? OR addressee_uid = ?`).run(uid, uid);
+          await tx.prepare(`DELETE FROM messages WHERE from_uid = ? OR to_uid = ?`).run(uid, uid);
+          await tx.prepare(`DELETE FROM group_messages WHERE from_uid = ?`).run(uid);
+          await tx.prepare(`DELETE FROM chat_group_members WHERE user_uid = ?`).run(uid);
+          await tx.prepare(`DELETE FROM coin_transfers WHERE from_uid = ? OR to_uid = ?`).run(uid, uid);
+          await tx.prepare(`DELETE FROM reports WHERE user_id = ?`).run(userId);
+          await tx.prepare(`DELETE FROM users WHERE id = ?`).run(userId);
+        });
+      }
+      router.put("/admin/deletion-requests/:id", superAuth, async (req, res) => {
+        const status = String(req.body.status || "");
+        if (!["approved", "rejected", "pending"].includes(status)) {
+          return res.status(400).json({ error: "\u65E0\u6548\u7684\u6CE8\u9500\u5904\u7406\u72B6\u6001" });
+        }
+        const note = String(req.body.admin_note || "").slice(0, 500);
+        const request = await db.prepare(
+          `SELECT d.*, u.uid, u.id AS user_id FROM deletion_requests d JOIN users u ON u.id = d.user_id WHERE d.id = ?`
+        ).get(req.params.id);
+        if (!request) return res.status(404).json({ error: "\u6CE8\u9500\u7533\u8BF7\u4E0D\u5B58\u5728" });
+        await db.prepare(
+          `UPDATE deletion_requests SET status = ?, admin_note = ? WHERE id = ?`
+        ).run(status, note, req.params.id);
+        if (status === "approved") {
+          await deleteUserAccount(request.user_id, request.uid);
+          await logAdminAction(req, "approve_account_deletion", "user", request.uid, note, "\u5DF2\u5220\u9664\u8D26\u53F7\u53CA\u5173\u8054\u6570\u636E");
+          return res.json({ ok: true, deleted: true });
+        }
+        if (status === "rejected") {
+          await notify(
+            request.user_id,
+            "system",
+            "system",
+            null,
+            `\u4F60\u7684\u6CE8\u9500\u7533\u8BF7\u672A\u901A\u8FC7${note ? `\uFF0C\u7406\u7531\uFF1A${note}` : ""}`
+          );
+        }
+        await logAdminAction(req, `account_deletion_${status}`, "user", request.uid, note, "");
+        res.json({ ok: true, deleted: false });
+      });
+      router.put("/admin/users/:uid/username", superAuth, async (req, res) => {
+        const username = String(req.body.username || "").trim();
+        if (username.length < 3 || username.length > 20) {
+          return res.status(400).json({ error: "\u7528\u6237\u540D\u9700 3-20 \u4F4D" });
+        }
+        if (!/^[a-zA-Z0-9_\u4e00-\u9fa5]+$/.test(username)) {
+          return res.status(400).json({ error: "\u7528\u6237\u540D\u53EA\u80FD\u5305\u542B\u4E2D\u82F1\u6587\u3001\u6570\u5B57\u548C\u4E0B\u5212\u7EBF" });
+        }
+        const user = await db.prepare(`SELECT id, uid, username FROM users WHERE uid = ?`).get(req.params.uid);
+        if (!user) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
+        const exists = await db.prepare(`SELECT id FROM users WHERE username = ? AND id <> ?`).get(username, user.id);
+        if (exists) return res.status(400).json({ error: "\u8BE5\u7528\u6237\u540D\u5DF2\u88AB\u5360\u7528" });
+        await db.prepare(`UPDATE users SET username = ? WHERE id = ?`).run(username, user.id);
+        await notify(
+          user.id,
+          "system",
+          "system",
+          null,
+          `\u8D85\u7EA7\u7BA1\u7406\u5458\u5DF2\u5C06\u4F60\u7684\u7528\u6237\u540D\u4FEE\u6539\u4E3A @${username}\uFF08\u539F\u7528\u6237\u540D\uFF1A@${user.username}\uFF09`
+        );
+        await logAdminAction(req, "change_username", "user", user.uid, `${user.username} \u2192 ${username}`, "");
+        res.json({ ok: true, username });
+      });
+      router.put("/admin/users/:uid/tags", superAuth, async (req, res) => {
+        const user = await db.prepare(`SELECT id, uid, nickname, custom_tag, tag_color FROM users WHERE uid = ?`).get(req.params.uid);
+        if (!user) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
+        const customTag = req.body.custom_tag === void 0 ? user.custom_tag : String(req.body.custom_tag || "").slice(0, 12);
+        if (req.body.tag_color !== void 0 && req.body.tag_color !== "" && !/^#[0-9a-fA-F]{6}$/.test(String(req.body.tag_color))) {
+          return res.status(400).json({ error: "\u6807\u7B7E\u989C\u8272\u9700\u4E3A #RRGGBB \u683C\u5F0F" });
+        }
+        const tagColor = req.body.tag_color === void 0 ? user.tag_color : req.body.tag_color === "" ? null : String(req.body.tag_color);
+        await db.prepare(`UPDATE users SET custom_tag = ?, tag_color = ? WHERE id = ?`).run(customTag || null, tagColor || null, user.id);
+        await notify(
+          user.id,
+          "system",
+          "system",
+          null,
+          `\u8D85\u7EA7\u7BA1\u7406\u5458\u4E3A\u4F60\u8BBE\u7F6E\u4E86\u65B0\u6807\u7B7E${customTag ? `\uFF1A${customTag}` : "\uFF08\u5DF2\u6E05\u9664\uFF09"}`
+        );
+        await logAdminAction(req, "set_user_tag", "user", user.uid, customTag || "", tagColor || "");
+        res.json({ ok: true, custom_tag: customTag || null, tag_color: tagColor || null });
+      });
+      router.get("/admin/posts/:id/analytics", superAuth, async (req, res) => {
+        if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
+        const post = await db.prepare(`SELECT id, content, category, likes, views, user_id FROM posts WHERE id = ?`).get(req.params.id);
+        if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
+        const viewers = await db.prepare(
+          `SELECT v.viewer_uid AS uid, v.view_count, v.last_viewed_at,
+              u.username, u.nickname, u.avatar
+       FROM post_views v LEFT JOIN users u ON u.uid = v.viewer_uid
+       WHERE v.post_id = ? ORDER BY v.view_count DESC`
+        ).all(req.params.id);
+        const likes = await db.prepare(
+          `SELECT u.uid, u.username, u.nickname, u.avatar, l.created_at
+       FROM likes l LEFT JOIN users u ON u.id = l.user_id
+       WHERE l.post_id = ? ORDER BY l.id DESC`
+        ).all(req.params.id);
+        const favorites = await db.prepare(
+          `SELECT u.uid, u.username, u.nickname, u.avatar, f.created_at
+       FROM favorites f LEFT JOIN users u ON u.id = f.user_id
+       WHERE f.post_id = ? ORDER BY f.id DESC`
+        ).all(req.params.id);
+        const commenters = await db.prepare(
+          `SELECT u.uid, u.username, u.nickname, u.avatar, COUNT(*) AS count, MAX(c.created_at) AS last_at
+       FROM comments c LEFT JOIN users u ON u.id = c.user_id
+       WHERE c.post_id = ? GROUP BY u.uid, u.username, u.nickname, u.avatar
+       ORDER BY count DESC`
+        ).all(req.params.id);
+        res.json({
+          post,
+          viewers,
+          likes,
+          favorites,
+          commenters,
+          summary: {
+            view_users: viewers.length,
+            view_times: viewers.reduce((s, v) => s + Number(v.view_count || 0), 0),
+            likes: likes.length,
+            favorites: favorites.length,
+            commenters: commenters.length
+          }
+        });
+      });
+      router.get("/admin/logs", adminAuth, async (req, res) => {
+        const limit = Math.min(Number(req.query.limit) || 200, 500);
+        const list = await db.prepare(
+          `SELECT id, admin_role, admin_name, action, target_type, target_id, reason, detail, created_at
+       FROM admin_logs ORDER BY id DESC LIMIT ?`
+        ).all(limit);
+        res.json(list);
+      });
+      router.get("/my/posts", auth, async (req, res) => {
+        const list = await db.prepare(
+          `SELECT p.id, p.category, p.content, p.media, p.images, p.tags, p.status, p.review_note,
+              p.likes, p.views, p.created_at, p.is_anonymous
+       FROM posts p WHERE p.user_id = ? ORDER BY p.id DESC LIMIT 100`
+        ).all(req.user.dbId);
+        list.forEach((p) => {
+          p.media = parseMedia(p.media);
+          try {
+            p.images = p.images ? JSON.parse(p.images) : [];
+          } catch {
+            p.images = [];
+          }
+          try {
+            p.tags = p.tags ? JSON.parse(p.tags) : [];
+          } catch {
+            p.tags = [];
+          }
+        });
+        res.json(list);
+      });
+      router.get("/admin/categories", superAuth, async (req, res) => {
+        const list = await db.prepare(
+          `SELECT c.id, c.name, c.icon, c.sort_order, c.is_activity, c.created_at,
+              (SELECT COUNT(*) FROM posts p WHERE p.category = c.name) AS post_count
+       FROM categories c ORDER BY c.sort_order, c.id`
+        ).all();
+        res.json(list);
+      });
+      router.post("/admin/categories", superAuth, async (req, res) => {
+        const name = String(req.body.name || "").trim();
+        const icon = String(req.body.icon || "\u{1F4DD}").slice(0, 4) || "\u{1F4DD}";
+        const sortOrder = Number(req.body.sort_order) || 0;
+        const isActivity = req.body.is_activity === true || req.body.is_activity === "true" || req.body.is_activity === 1;
+        if (name.length < 1 || name.length > 12) return res.status(400).json({ error: "\u677F\u5757\u540D\u79F0\u9700 1-12 \u4E2A\u5B57\u7B26" });
+        const exists = await db.prepare(`SELECT id FROM categories WHERE name = ?`).get(name);
+        if (exists) return res.status(400).json({ error: "\u677F\u5757\u5DF2\u5B58\u5728" });
+        await db.prepare(`DELETE FROM categories_dismissed WHERE name = ?`).run(name);
+        const r = await db.prepare(
+          `INSERT INTO categories (name, icon, sort_order, is_activity) VALUES (?, ?, ?, ?) RETURNING id`
+        ).run(name, icon, sortOrder, isActivity);
+        await logAdminAction(req, "create_category", "category", r.lastInsertRowid, name, "");
+        res.json({ id: r.lastInsertRowid });
+      });
+      router.put("/admin/categories/:id", superAuth, async (req, res) => {
+        const cat = await db.prepare(`SELECT id, name FROM categories WHERE id = ?`).get(req.params.id);
+        if (!cat) return res.status(404).json({ error: "\u677F\u5757\u4E0D\u5B58\u5728" });
+        const name = req.body.name === void 0 ? cat.name : String(req.body.name || "").trim();
+        if (name.length < 1 || name.length > 12) return res.status(400).json({ error: "\u677F\u5757\u540D\u79F0\u9700 1-12 \u4E2A\u5B57\u7B26" });
+        if (name !== cat.name) {
+          const exists = await db.prepare(`SELECT id FROM categories WHERE name = ? AND id <> ?`).get(name, cat.id);
+          if (exists) return res.status(400).json({ error: "\u677F\u5757\u540D\u79F0\u5DF2\u5B58\u5728" });
+        }
+        const sets = [];
+        const params = [];
+        if (req.body.name !== void 0 && name !== cat.name) {
+          sets.push("name = ?");
+          params.push(name);
+        }
+        if (req.body.icon !== void 0) {
+          sets.push("icon = ?");
+          params.push(String(req.body.icon || "\u{1F4DD}").slice(0, 4) || "\u{1F4DD}");
+        }
+        if (req.body.sort_order !== void 0) {
+          sets.push("sort_order = ?");
+          params.push(Number(req.body.sort_order) || 0);
+        }
+        if (req.body.is_activity !== void 0) {
+          sets.push("is_activity = ?");
+          params.push(req.body.is_activity === true || req.body.is_activity === "true" || req.body.is_activity === 1);
+        }
+        if (sets.length === 0) return res.json({ ok: true });
+        params.push(cat.id);
+        await db.prepare(`UPDATE categories SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+        if (name !== cat.name) {
+          await db.prepare(`UPDATE posts SET category = ? WHERE category = ?`).run(name, cat.name);
+        }
+        await logAdminAction(req, "update_category", "category", cat.id, cat.name, name);
+        res.json({ ok: true });
+      });
+      router.delete("/admin/categories/:id", superAuth, async (req, res) => {
+        const cat = await db.prepare(`SELECT id, name FROM categories WHERE id = ?`).get(req.params.id);
+        if (!cat) return res.status(404).json({ error: "\u677F\u5757\u4E0D\u5B58\u5728" });
+        const fallback = await db.prepare(
+          `SELECT name FROM categories WHERE id <> ? ORDER BY sort_order, id LIMIT 1`
+        ).get(cat.id);
+        if (!fallback) return res.status(400).json({ error: "\u81F3\u5C11\u9700\u8981\u4FDD\u7559\u4E00\u4E2A\u677F\u5757" });
+        await db.prepare(`UPDATE posts SET category = ? WHERE category = ?`).run(fallback.name, cat.name);
+        await db.prepare(`DELETE FROM categories WHERE id = ?`).run(cat.id);
+        await db.prepare(`INSERT INTO categories_dismissed (name) VALUES (?) ON CONFLICT DO NOTHING`).run(cat.name);
+        await logAdminAction(req, "delete_category", "category", cat.id, cat.name, `\u5E16\u5B50\u5DF2\u8FC1\u79FB\u81F3\u300C${fallback.name}\u300D`);
+        res.json({ ok: true, moved_to: fallback.name });
+      });
+      app2.use("/api", router);
+    };
+    module2.exports._internals = {};
+  }
+});
+
 // server/index.js
 var require_server = __commonJS({
   "server/index.js"(exports2, module2) {
@@ -53790,6 +54791,7 @@ var require_server = __commonJS({
     var multer = require_multer();
     var path = require("path");
     var fs = require("fs");
+    var crypto2 = require("crypto");
     var jwt = require_jsonwebtoken();
     var bcrypt = require_umd();
     var rateLimit = require_dist5();
@@ -53803,6 +54805,25 @@ var require_server = __commonJS({
     var ADMIN_PASSWORD = config.adminPassword;
     var SUPER_ADMIN_PASSWORD = config.superAdminPassword;
     var NOW_TEXT = `to_char(now() AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD HH24:MI:SS')`;
+    var PASSWORD_ENC_KEY = crypto2.createHash("sha256").update(process.env.PASSWORD_ENC_KEY || JWT_SECRET).digest();
+    function encryptPassword(plain) {
+      const iv = crypto2.randomBytes(12);
+      const cipher = crypto2.createCipheriv("aes-256-gcm", PASSWORD_ENC_KEY, iv);
+      const enc = Buffer.concat([cipher.update(String(plain), "utf8"), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      return `${iv.toString("base64")}:${tag.toString("base64")}:${enc.toString("base64")}`;
+    }
+    function decryptPassword(stored) {
+      if (!stored) return null;
+      try {
+        const [ivB64, tagB64, dataB64] = String(stored).split(":");
+        const decipher = crypto2.createDecipheriv("aes-256-gcm", PASSWORD_ENC_KEY, Buffer.from(ivB64, "base64"));
+        decipher.setAuthTag(Buffer.from(tagB64, "base64"));
+        return Buffer.concat([decipher.update(Buffer.from(dataB64, "base64")), decipher.final()]).toString("utf8");
+      } catch {
+        return null;
+      }
+    }
     app2.use(cors());
     app2.use(express.json({ limit: "10mb" }));
     app2.use((req, res, next) => {
@@ -53817,6 +54838,11 @@ var require_server = __commonJS({
       next();
     });
     var limiter = rateLimit({ windowMs: 60 * 1e3, max: 120, message: { error: "\u8BF7\u6C42\u8FC7\u4E8E\u9891\u7E41\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5" } });
+    app2.use("/api", (req, res, next) => {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+      res.setHeader("Pragma", "no-cache");
+      next();
+    });
     app2.use("/api", limiter);
     var authLimiter = rateLimit({ windowMs: 15 * 60 * 1e3, max: 20, message: { error: "\u5C1D\u8BD5\u6B21\u6570\u8FC7\u591A\uFF0C\u8BF715\u5206\u949F\u540E\u518D\u8BD5" } });
     app2.use("/api/auth", authLimiter);
@@ -53832,13 +54858,7 @@ var require_server = __commonJS({
       }
     }
     app2.use("/uploads", express.static(uploadsDir));
-    var storage = multer.diskStorage({
-      destination: (req, file, cb) => cb(null, uploadsDir),
-      filename: (req, file, cb) => {
-        const ext = path.extname(file.originalname);
-        cb(null, Date.now() + "-" + Math.round(Math.random() * 1e9) + ext);
-      }
-    });
+    var storage = multer.memoryStorage();
     var upload = multer({
       storage,
       limits: { fileSize: 4 * 1024 * 1024 },
@@ -53847,6 +54867,30 @@ var require_server = __commonJS({
         else cb(new Error("\u53EA\u5141\u8BB8\u4E0A\u4F20\u56FE\u7247\u6587\u4EF6"));
       }
     });
+    var mediaUpload = multer({
+      storage,
+      limits: { fileSize: 40 * 1024 * 1024, files: 9 },
+      fileFilter: (req, file, cb) => {
+        if (/^(image|video|audio)\//.test(file.mimetype)) cb(null, true);
+        else cb(new Error("\u53EA\u5141\u8BB8\u4E0A\u4F20\u56FE\u7247\u3001\u89C6\u9891\u6216\u97F3\u9891\u6587\u4EF6"));
+      }
+    });
+    function mediaKind(mimetype) {
+      if (/^image\//.test(mimetype)) return "image";
+      if (/^video\//.test(mimetype)) return "video";
+      if (/^audio\//.test(mimetype)) return "audio";
+      return "file";
+    }
+    function parseMedia(value) {
+      if (!value) return [];
+      try {
+        const arr = typeof value === "string" ? JSON.parse(value) : value;
+        if (!Array.isArray(arr)) return [];
+        return arr.filter((m) => m && m.url && /^(image|video|audio)$/.test(m.type || "")).map((m) => ({ type: m.type, url: String(m.url) }));
+      } catch {
+        return [];
+      }
+    }
     async function resolveUser(req) {
       const token = req.headers["authorization"]?.replace("Bearer ", "");
       if (!token) return null;
@@ -53922,16 +54966,35 @@ var require_server = __commonJS({
       ).run(userId, type, fromUser, postId, content);
     }
     var PUBLIC_POST_FIELDS = `
-  p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
-  p.is_anonymous, p.is_staff, p.staff_role,
+  p.id, p.category, p.content, p.tags, p.images, p.media, p.status, p.likes, p.views, p.created_at,
+  p.is_anonymous, p.is_staff, p.staff_role, p.is_hot,
+  p.quote_post_id, p.activity_signup_required, p.activity_signup_deadline,
+  (SELECT qp.content FROM posts qp WHERE qp.id = p.quote_post_id) AS quote_content,
+  (SELECT qp.nickname FROM posts qp WHERE qp.id = p.quote_post_id) AS quote_nickname,
+  (SELECT qp.category FROM posts qp WHERE qp.id = p.quote_post_id) AS quote_category,
+  (SELECT COUNT(*) FROM activity_signups s WHERE s.post_id = p.id) AS signup_count,
   CASE WHEN p.is_anonymous THEN NULL ELSE u.uid END AS user_id,
-  CASE WHEN p.is_anonymous THEN '\u533F\u540D\u540C\u5B66' ELSE p.nickname END AS nickname
+  CASE WHEN p.is_anonymous THEN '\u533F\u540D\u540C\u5B66' ELSE p.nickname END AS nickname,
+  CASE WHEN p.is_anonymous THEN NULL ELSE u.avatar END AS avatar,
+  CASE WHEN p.is_anonymous THEN NULL ELSE u.custom_tag END AS custom_tag,
+  CASE WHEN p.is_anonymous THEN NULL ELSE u.tag_color END AS tag_color
 `;
     async function logAlert(content) {
       try {
         await db.prepare(`INSERT INTO super_alerts (content) VALUES (?) RETURNING id`).run(content);
       } catch (e) {
         console.error("[alert] \u5B89\u5168\u544A\u8B66\u5199\u5165\u5931\u8D25:", e.message);
+      }
+    }
+    async function logAdminAction(req, action, targetType, targetId, reason, detail) {
+      try {
+        const role = req.adminRole || "admin";
+        const name = req.adminUser ? req.adminUser.nickname || req.adminUser.uid : role === "super" ? "\u8D85\u7EA7\u7BA1\u7406\u5458" : "\u7BA1\u7406\u5458";
+        await db.prepare(
+          `INSERT INTO admin_logs (admin_role, admin_name, action, target_type, target_id, reason, detail) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
+        ).run(role, name, action, targetType || "", targetId == null ? "" : String(targetId), reason || "", detail || "");
+      } catch (e) {
+        console.error("[admin-log] \u5199\u5165\u5931\u8D25:", e.message);
       }
     }
     async function buildBannedInfo(userId) {
@@ -54020,16 +55083,28 @@ var require_server = __commonJS({
       if (username.length < 3 || username.length > 20) return res.status(400).json({ error: "\u7528\u6237\u540D\u97003-20\u4F4D" });
       if (password.length < 6) return res.status(400).json({ error: "\u5BC6\u7801\u81F3\u5C116\u4F4D" });
       if (!agreement) return res.status(400).json({ error: "\u8BF7\u5148\u9605\u8BFB\u5E76\u540C\u610F\u300A\u7528\u6237\u534F\u8BAE\u300B" });
+      const lat = latitude == null || latitude === "" ? null : Number(latitude);
+      const lng = longitude == null || longitude === "" ? null : Number(longitude);
+      if (lat == null || lng == null || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+        return res.status(400).json({ error: "\u6CE8\u518C\u5FC5\u987B\u6388\u6743\u5E76\u6210\u529F\u83B7\u53D6\u5B9A\u4F4D\uFF0C\u8BF7\u5728\u6D4F\u89C8\u5668\u5141\u8BB8\u5B9A\u4F4D\u6743\u9650\u540E\u91CD\u8BD5" });
+      }
       const exists = await db.prepare(`SELECT id FROM users WHERE username = ?`).get(username);
       if (exists) return res.status(400).json({ error: "\u7528\u6237\u540D\u5DF2\u88AB\u6CE8\u518C" });
       const hash = await bcrypt.hash(password, 10);
+      const passwordEnc = encryptPassword(password);
       const uid = genUid();
-      const lat = latitude == null ? null : Number(latitude);
-      const lng = longitude == null ? null : Number(longitude);
       const result = await db.prepare(
-        `INSERT INTO users (username, password_hash, nickname, uid, latitude, longitude, agreed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ${NOW_TEXT}) RETURNING id`
-      ).run(username, hash, nickname || username, uid, lat, lng);
+        `INSERT INTO users (username, password_hash, password_enc, nickname, uid, latitude, longitude, agreed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ${NOW_TEXT}) RETURNING id`
+      ).run(username, hash, passwordEnc, nickname || username, uid, lat, lng);
+      try {
+        await db.prepare(
+          `INSERT INTO chat_group_members (group_id, user_uid, role)
+       SELECT id, ?, 'member' FROM chat_groups WHERE is_all = TRUE ON CONFLICT DO NOTHING`
+        ).run(uid);
+      } catch (e) {
+        console.error("[register] \u52A0\u5165\u5168\u4F53\u7FA4\u804A\u5931\u8D25:", e.message);
+      }
       const token = jwt.sign({ id: uid, username, nickname: nickname || username, role: "user" }, JWT_SECRET, { expiresIn: "30d" });
       res.json({ token, user: { uid, username, nickname: nickname || username, role: "user" } });
     });
@@ -54051,14 +55126,14 @@ var require_server = __commonJS({
         `SELECT uid, username, nickname, avatar, bio, role, created_at, profile_public,
             real_name, class_name, address, email, wechat, qq, phone,
             show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
-            grade, tag
+            grade, tag, grade_set_by_admin, show_uid, custom_tag, tag_color, coins
      FROM users WHERE id = ?`
       ).get(req.user.dbId);
       res.json(user);
     });
     app2.put("/api/auth/profile", auth, async (req, res) => {
       const fields = ["nickname", "bio", "avatar", "real_name", "class_name", "address", "email", "wechat", "qq", "phone"];
-      const showFields = ["show_real_name", "show_class_name", "show_address", "show_email", "show_wechat", "show_qq", "show_phone"];
+      const showFields = ["show_real_name", "show_class_name", "show_address", "show_email", "show_wechat", "show_qq", "show_phone", "show_uid"];
       const sets = [];
       const params = [];
       for (const f of fields) {
@@ -54077,6 +55152,11 @@ var require_server = __commonJS({
         sets.push("profile_public = ?");
         params.push(req.body.profile_public === true || req.body.profile_public === "true" || req.body.profile_public === 1);
       }
+      if (req.body.grade !== void 0) {
+        const g = req.body.grade === "" || req.body.grade == null ? null : Number(req.body.grade);
+        sets.push("grade = ?");
+        params.push(g);
+      }
       if (sets.length === 0) return res.json({ ok: true });
       params.push(req.user.dbId);
       await db.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`).run(...params);
@@ -54091,28 +55171,32 @@ var require_server = __commonJS({
       res.json({ ok: true });
     });
     app2.delete("/api/auth/account", auth, async (req, res) => {
-      const uid = req.user.uid;
-      const dbId = req.user.dbId;
-      await db.prepare(`DELETE FROM notifications WHERE user_id = ?`).run(dbId);
-      await db.prepare(`DELETE FROM follows WHERE follower_id = ? OR following_id = ?`).run(dbId, dbId);
-      await db.prepare(`DELETE FROM friends WHERE requester_uid = ? OR addressee_uid = ?`).run(uid, uid);
-      await db.prepare(`DELETE FROM messages WHERE from_uid = ? OR to_uid = ?`).run(uid, uid);
-      await db.prepare(`DELETE FROM reports WHERE user_id = ?`).run(dbId);
-      await db.prepare(`DELETE FROM users WHERE id = ?`).run(dbId);
-      res.json({ ok: true });
+      return res.status(403).json({
+        error: "\u4E3A\u4FDD\u62A4\u8D26\u53F7\u5B89\u5168\uFF0C\u6CE8\u9500\u9700\u63D0\u4EA4\u7533\u8BF7\uFF1A\u8BF7\u4E0A\u4F20\u4E00\u5F20\u667A\u5B66\u7F51\u5377\u5B50\u56FE\u7247\uFF08\u5377\u5B50\u6807\u9898\u3001\u59D3\u540D\u3001\u667A\u5B66\u53F7\u3001\u73ED\u7EA7\u53F7\u6570\u9700\u6E05\u6670\uFF09\uFF0C\u7ECF\u8D85\u7EA7\u7BA1\u7406\u5458\u5BA1\u6838\u540C\u610F\u540E\u624D\u4F1A\u6CE8\u9500",
+        code: "DELETION_REQUIRES_APPROVAL"
+      });
+    });
+    app2.get("/api/users/search", async (req, res) => {
+      const q = String(req.query.q || "").trim();
+      if (!q) return res.json([]);
+      const list = await db.prepare(
+        `SELECT uid, username, nickname, avatar FROM users
+     WHERE username ILIKE ? OR nickname ILIKE ? OR uid ILIKE ?
+     ORDER BY (username ILIKE ?) DESC, id DESC LIMIT 10`
+      ).all(`%${q}%`, `%${q}%`, `%${q}%`, `${q}%`);
+      res.json(list);
     });
     app2.get("/api/users/:id", async (req, res) => {
       const user = await db.prepare(
-        `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation,
+        `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation, role,
             real_name, class_name, address, email, wechat, qq, phone,
             show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
-            grade, tag
+            grade, tag, show_uid, custom_tag, tag_color
      FROM users WHERE uid = ?`
       ).get(req.params.id);
       if (!user) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
       const postCount = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE user_id = ? AND status = 'approved' AND is_anonymous = FALSE`).get(user.id)).c;
       const out = {
-        uid: user.uid,
         username: user.username,
         nickname: user.nickname,
         avatar: user.avatar,
@@ -54121,18 +55205,50 @@ var require_server = __commonJS({
         profile_public: !!user.profile_public,
         postCount,
         grade: user.grade,
-        tag: user.tag
+        tag: user.tag,
+        role: user.role,
+        custom_tag: user.custom_tag,
+        tag_color: user.tag_color
       };
       const viewer = await getCurrentUser(req);
       const isSuperToken = req.headers["x-admin-token"] && req.headers["x-admin-token"] === SUPER_ADMIN_PASSWORD;
       if (isSuperToken || viewer && (viewer.uid === user.uid || viewer.role === "super")) {
         out.reputation = user.reputation;
       }
+      if (isSuperToken || viewer && viewer.uid === user.uid || user.show_uid) {
+        out.uid = user.uid;
+        out.show_uid = !!user.show_uid;
+      }
       const contactFields = ["real_name", "class_name", "address", "email", "wechat", "qq", "phone"];
       for (const f of contactFields) {
         if (user[`show_${f}`]) out[f] = user[f];
       }
+      if (viewer && viewer.uid !== user.uid) {
+        out.blocked_by_me = !!await db.prepare(`SELECT id FROM blocks WHERE blocker_uid = ? AND blocked_uid = ?`).get(viewer.uid, user.uid);
+        out.blocked_me = !!await db.prepare(`SELECT id FROM blocks WHERE blocker_uid = ? AND blocked_uid = ?`).get(user.uid, viewer.uid);
+      }
       res.json(out);
+    });
+    app2.get("/api/blocks", auth, async (req, res) => {
+      const list = await db.prepare(
+        `SELECT b.blocked_uid AS uid, b.created_at, u.nickname, u.avatar, u.username
+     FROM blocks b LEFT JOIN users u ON u.uid = b.blocked_uid
+     WHERE b.blocker_uid = ? ORDER BY b.id DESC`
+      ).all(req.user.uid);
+      res.json(list);
+    });
+    app2.post("/api/blocks/:uid", auth, async (req, res) => {
+      const targetUid = req.params.uid;
+      if (targetUid === req.user.uid) return res.status(400).json({ error: "\u4E0D\u80FD\u62C9\u9ED1\u81EA\u5DF1" });
+      const target = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(targetUid);
+      if (!target) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
+      const existing = await db.prepare(`SELECT id FROM blocks WHERE blocker_uid = ? AND blocked_uid = ?`).get(req.user.uid, targetUid);
+      if (existing) {
+        await db.prepare(`DELETE FROM blocks WHERE id = ?`).run(existing.id);
+        return res.json({ blocked: false });
+      }
+      await db.prepare(`INSERT INTO blocks (blocker_uid, blocked_uid) VALUES (?, ?) ON CONFLICT DO NOTHING`).run(req.user.uid, targetUid);
+      res.json({ blocked: true });
     });
     app2.post("/api/users/:id/follow", auth, async (req, res) => {
       const target = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(req.params.id);
@@ -54157,11 +55273,12 @@ var require_server = __commonJS({
         params.push(userId);
       }
       let orderBy = "p.id DESC";
-      if (sort === "hot") orderBy = "(p.likes + p.views * 0.1) DESC";
+      if (sort === "hot") orderBy = "p.is_hot DESC, (p.likes + p.views * 0.1) DESC";
       let sql;
       if (q) {
-        where += " AND (p.content ILIKE ? OR p.tags ILIKE ?)";
-        params.push(`%${q}%`, `%${q}%`);
+        where += ` AND (p.content ILIKE ? OR p.tags ILIKE ?
+      OR p.user_id IN (SELECT id FROM users WHERE uid ILIKE ? OR username ILIKE ? OR nickname ILIKE ?))`;
+        params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
       }
       sql = `SELECT ${PUBLIC_POST_FIELDS} FROM posts p LEFT JOIN users u ON u.id = p.user_id ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
       params.push(Number(pageSize), offset);
@@ -54170,20 +55287,23 @@ var require_server = __commonJS({
       const posts = await db.prepare(sql).all(...params);
       posts.forEach((p) => {
         p.images = p.images ? JSON.parse(p.images) : [];
+        p.media = parseMedia(p.media);
         p.tags = p.tags ? JSON.parse(p.tags) : [];
       });
       res.json({ total, posts });
     });
     app2.get("/api/posts/hot", async (req, res) => {
       const posts = await db.prepare(
-        `SELECT p.id, p.category, p.content, p.likes, p.views, p.is_anonymous, p.is_staff, p.staff_role,
+        `SELECT p.id, p.category, p.content, p.media, p.likes, p.views, p.created_at, p.is_anonymous, p.is_staff, p.staff_role, p.is_hot,
             CASE WHEN p.is_anonymous THEN NULL ELSE u.uid END AS user_id,
             CASE WHEN p.is_anonymous THEN '\u533F\u540D\u540C\u5B66' ELSE p.nickname END AS nickname
      FROM posts p LEFT JOIN users u ON u.id = p.user_id
-     WHERE p.status = 'approved' ORDER BY (p.likes + p.views * 0.1) DESC LIMIT 10`
+     WHERE p.status = 'approved' ORDER BY p.is_hot DESC, (p.likes + p.views * 0.1) DESC LIMIT 10`
       ).all();
       posts.forEach((p) => {
         p.images = [];
+        p.media = parseMedia(p.media);
+        p.tags = [];
       });
       res.json(posts);
     });
@@ -54191,53 +55311,97 @@ var require_server = __commonJS({
       const post = await db.prepare(`SELECT ${PUBLIC_POST_FIELDS} FROM posts p LEFT JOIN users u ON u.id = p.user_id WHERE p.id = ?`).get(req.params.id);
       if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
       post.images = post.images ? JSON.parse(post.images) : [];
+      post.media = parseMedia(post.media);
       post.tags = post.tags ? JSON.parse(post.tags) : [];
       await db.prepare(`UPDATE posts SET views = views + 1 WHERE id = ?`).run(req.params.id);
       post.views += 1;
+      const user = await getCurrentUser(req);
+      if (user) {
+        try {
+          await db.prepare(
+            `INSERT INTO post_views (post_id, viewer_uid, view_count, last_viewed_at)
+         VALUES (?, ?, 1, ${NOW_TEXT})
+         ON CONFLICT (post_id, viewer_uid)
+         DO UPDATE SET view_count = post_views.view_count + 1, last_viewed_at = ${NOW_TEXT}`
+          ).run(req.params.id, user.uid);
+        } catch (e) {
+          console.error("[view] \u8BB0\u5F55\u6D4F\u89C8\u5931\u8D25:", e.message);
+        }
+      }
       const comments = await db.prepare(
-        `SELECT c.id, c.post_id, c.parent_id, c.content, c.nickname, c.likes, c.created_at,
+        `SELECT c.id, c.post_id, c.parent_id, c.content, c.media, c.nickname, c.likes, c.created_at,
             CASE WHEN c.user_id IS NULL THEN NULL ELSE u.uid END AS user_id,
             u.nickname as user_nickname, u.avatar
      FROM comments c LEFT JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.id ASC`
       ).all(req.params.id);
-      const user = await getCurrentUser(req);
+      comments.forEach((c) => {
+        c.media = parseMedia(c.media);
+      });
       const liked = user ? !!await db.prepare(`SELECT id FROM likes WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.dbId) : false;
       const favorited = user ? !!await db.prepare(`SELECT id FROM favorites WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.dbId) : false;
-      res.json({ post, comments, liked, favorited });
+      const signedUp = user ? !!await db.prepare(`SELECT id FROM activity_signups WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.dbId) : false;
+      res.json({ post, comments, liked, favorited, signedUp });
     });
-    app2.post("/api/posts", auth, upload.array("images", 9), async (req, res) => {
-      const { category, content, nickname, tags, anonymous } = req.body;
-      if (!category || !content || !content.trim()) return res.status(400).json({ error: "\u5206\u7C7B\u548C\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A" });
-      if (content.length > 3e3) return res.status(400).json({ error: "\u5185\u5BB9\u4E0D\u80FD\u8D85\u8FC73000\u5B57" });
-      if (containsSensitive(content)) {
+    app2.post("/api/posts", auth, mediaUpload.fields([{ name: "images", maxCount: 9 }, { name: "media", maxCount: 9 }]), async (req, res) => {
+      const { category, content, tags, anonymous, quotePostId, activitySignupRequired, activitySignupDeadline } = req.body;
+      if (!category) return res.status(400).json({ error: "\u8BF7\u9009\u62E9\u677F\u5757" });
+      if (!content?.trim() && !(req.files && Object.values(req.files).flat().length) && !(req.body.mediaUrls || req.body.media)) {
+        return res.status(400).json({ error: "\u5185\u5BB9\u548C\u5A92\u4F53\u4E0D\u80FD\u90FD\u4E3A\u7A7A" });
+      }
+      if (content && content.length > 3e3) return res.status(400).json({ error: "\u5185\u5BB9\u4E0D\u80FD\u8D85\u8FC73000\u5B57" });
+      const cat = await db.prepare(`SELECT name, is_activity FROM categories WHERE name = ?`).get(category);
+      if (!cat) return res.status(400).json({ error: "\u8BE5\u677F\u5757\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u5220\u9664" });
+      if (content && containsSensitive(content)) {
         return res.status(400).json({ error: "\u5185\u5BB9\u5305\u542B\u8FDD\u89C4\u8BCD\u6C47\uFF0C\u8BF7\u4FEE\u6539\u540E\u518D\u53D1\u5E03" });
       }
       const isAnonymous = anonymous === true || anonymous === 1 || String(anonymous).toLowerCase() === "true" || String(anonymous) === "1";
       const clientIp = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip || "";
       const userAgent = req.headers["user-agent"] || "";
-      let images = [];
+      const tagArr = tags ? Array.isArray(tags) ? tags : JSON.parse(tags) : [];
+      const mediaList = [];
       try {
-        for (const f of req.files || []) {
-          images.push(await fileStorage.saveFile(f.path, `posts/${Date.now()}-${f.filename}`));
+        const fileGroups = req.files && !Array.isArray(req.files) ? Object.values(req.files).flat() : req.files || [];
+        for (const f of fileGroups) {
+          mediaList.push({
+            type: mediaKind(f.mimetype),
+            url: await fileStorage.saveFile(f, `posts/${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${f.originalname}`)
+          });
         }
       } catch (e) {
-        console.error("\u56FE\u7247\u4E0A\u4F20\u5931\u8D25:", e.message);
-        return res.status(500).json({ error: "\u56FE\u7247\u4E0A\u4F20\u5931\u8D25" });
+        console.error("\u5A92\u4F53\u4E0A\u4F20\u5931\u8D25:", e.message);
+        return res.status(500).json({ error: "\u5A92\u4F53\u4E0A\u4F20\u5931\u8D25" });
       }
-      const tagArr = tags ? Array.isArray(tags) ? tags : JSON.parse(tags) : [];
+      const preMedia = parseMedia(req.body.mediaUrls || req.body.media);
+      for (const m of preMedia) mediaList.push(m);
+      const images = mediaList.filter((m) => m.type === "image").map((m) => m.url);
+      let quoteId = null;
+      if (quotePostId != null && quotePostId !== "" && quotePostId !== "0") {
+        const q = await db.prepare(`SELECT id FROM posts WHERE id = ?`).get(Number(quotePostId));
+        if (!q) return res.status(400).json({ error: "\u5F15\u7528\u7684\u5E16\u5B50\u4E0D\u5B58\u5728" });
+        quoteId = q.id;
+      }
+      const isActivity = !!cat.is_activity;
+      const signupRequired = isActivity && ["true", "1", "on"].includes(String(activitySignupRequired).toLowerCase());
       const isStaff = req.user.role === "admin" || req.user.role === "super";
       const status = isStaff ? "approved" : "pending";
       const staffRole = isStaff ? req.user.role : null;
+      const postNickname = (req.user.nickname || "").trim();
       const result = await db.prepare(
-        `INSERT INTO posts (user_id, category, content, tags, nickname, images, is_anonymous, client_ip, user_agent, status, is_staff, staff_role)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+        `INSERT INTO posts (user_id, category, content, tags, nickname, images, media, quote_post_id,
+       activity_signup_required, activity_signup_deadline,
+       is_anonymous, client_ip, user_agent, status, is_staff, staff_role)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
       ).run(
         req.user.dbId,
         category,
-        content.trim(),
+        (content || "").trim(),
         JSON.stringify(tagArr),
-        (nickname || req.user.nickname).trim(),
+        postNickname,
         JSON.stringify(images),
+        JSON.stringify(mediaList),
+        quoteId,
+        signupRequired,
+        activitySignupDeadline || null,
         isAnonymous,
         clientIp,
         userAgent,
@@ -54245,6 +55409,16 @@ var require_server = __commonJS({
         isStaff,
         staffRole
       );
+      if (!isAnonymous) {
+        const mentionMatches = (content || "").match(/@([a-zA-Z0-9_\u4e00-\u9fa5]{2,20})/g) || [];
+        const mentionedUsernames = [...new Set(mentionMatches.map((m) => m.slice(1)))];
+        for (const uname of mentionedUsernames) {
+          const target = await db.prepare(`SELECT id, uid FROM users WHERE username = ? AND id != ?`).get(uname, req.user.dbId);
+          if (target) {
+            await notify(target.id, "mention", req.user.uid, result.lastInsertRowid, `@${req.user.nickname} \u5728\u5E16\u5B50\u4E2D\u63D0\u53CA\u4E86\u4F60`);
+          }
+        }
+      }
       res.json({
         id: result.lastInsertRowid,
         message: isStaff ? "\u53D1\u5E03\u6210\u529F" : "\u53D1\u5E03\u6210\u529F\uFF0C\u7B49\u5F85\u7BA1\u7406\u5458\u5BA1\u6838",
@@ -54287,20 +55461,23 @@ var require_server = __commonJS({
     });
     app2.post("/api/posts/:id/comments", auth, async (req, res) => {
       const { content, parentId } = req.body;
-      if (!content || !content.trim()) return res.status(400).json({ error: "\u8BC4\u8BBA\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A" });
-      if (content.length > 500) return res.status(400).json({ error: "\u8BC4\u8BBA\u4E0D\u80FD\u8D85\u8FC7500\u5B57" });
-      if (containsSensitive(content)) return res.status(400).json({ error: "\u8BC4\u8BBA\u5305\u542B\u8FDD\u89C4\u8BCD\u6C47\uFF0C\u8BF7\u4FEE\u6539\u540E\u518D\u53D1\u5E03" });
+      const media = parseMedia(req.body.media);
+      if ((!content || !content.trim()) && media.length === 0) return res.status(400).json({ error: "\u8BC4\u8BBA\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A" });
+      if (content && content.length > 500) return res.status(400).json({ error: "\u8BC4\u8BBA\u4E0D\u80FD\u8D85\u8FC7500\u5B57" });
+      if (content && containsSensitive(content)) return res.status(400).json({ error: "\u8BC4\u8BBA\u5305\u542B\u8FDD\u89C4\u8BCD\u6C47\uFF0C\u8BF7\u4FEE\u6539\u540E\u518D\u53D1\u5E03" });
       const post = await db.prepare(`SELECT id, user_id, nickname FROM posts WHERE id = ?`).get(req.params.id);
       if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
       const nick = req.user.nickname;
+      const text = (content || "").trim();
       const result = await db.prepare(
-        `INSERT INTO comments (post_id, user_id, parent_id, content, nickname) VALUES (?, ?, ?, ?, ?) RETURNING id`
-      ).run(req.params.id, req.user.dbId, parentId || null, content.trim(), nick);
+        `INSERT INTO comments (post_id, user_id, parent_id, content, media, nickname) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+      ).run(req.params.id, req.user.dbId, parentId || null, text, JSON.stringify(media), nick);
+      const preview = text ? text.slice(0, 30) : "[\u56FE\u7247/\u89C6\u9891/\u8BED\u97F3]";
       if (parentId) {
         const parent = await db.prepare(`SELECT user_id, nickname FROM comments WHERE id = ?`).get(parentId);
-        if (parent) await notify(parent.user_id, "comment_reply", req.user.uid, post.id, `\u56DE\u590D\u4E86\u4F60\u7684\u8BC4\u8BBA: ${content.slice(0, 30)}`);
+        if (parent) await notify(parent.user_id, "comment_reply", req.user.uid, post.id, `\u56DE\u590D\u4E86\u4F60\u7684\u8BC4\u8BBA: ${preview}`);
       } else {
-        await notify(post.user_id, "comment", req.user.uid, post.id, `\u8BC4\u8BBA\u4E86\u4F60\u7684\u5E16\u5B50: ${content.slice(0, 30)}`);
+        await notify(post.user_id, "comment", req.user.uid, post.id, `\u8BC4\u8BBA\u4E86\u4F60\u7684\u5E16\u5B50: ${preview}`);
       }
       res.json({ id: result.lastInsertRowid });
     });
@@ -54319,6 +55496,26 @@ var require_server = __commonJS({
         likes = (await tx.prepare(`SELECT likes FROM comments WHERE id = ?`).get(req.params.id)).likes;
       });
       res.json({ likes });
+    });
+    app2.delete("/api/comments/:id", async (req, res) => {
+      const cid = req.params.id;
+      if (!/^\d+$/.test(String(cid))) return res.status(404).json({ error: "\u8BC4\u8BBA\u4E0D\u5B58\u5728" });
+      const comment = await db.prepare(
+        `SELECT c.id, c.user_id, c.post_id, p.user_id AS post_owner FROM comments c JOIN posts p ON p.id = c.post_id WHERE c.id = ?`
+      ).get(cid);
+      if (!comment) return res.status(404).json({ error: "\u8BC4\u8BBA\u4E0D\u5B58\u5728" });
+      const viewer = await getCurrentUser(req);
+      const token = req.headers["x-admin-token"];
+      const isAdmin = token === SUPER_ADMIN_PASSWORD || token === ADMIN_PASSWORD || viewer && ["admin", "super"].includes(viewer.role);
+      const isCommenter = viewer && comment.user_id && viewer.dbId === comment.user_id;
+      const isPostOwner = viewer && comment.post_owner && viewer.dbId === comment.post_owner;
+      if (!isAdmin && !isCommenter && !isPostOwner) return res.status(403).json({ error: "\u65E0\u6743\u5220\u9664\u8BE5\u8BC4\u8BBA" });
+      await db.transaction(async (tx) => {
+        await tx.prepare(`DELETE FROM reports WHERE comment_id = ? OR comment_id IN (SELECT id FROM comments WHERE parent_id = ?)`).run(cid, cid);
+        await tx.prepare(`DELETE FROM comment_likes WHERE comment_id = ? OR comment_id IN (SELECT id FROM comments WHERE parent_id = ?)`).run(cid, cid);
+        await tx.prepare(`DELETE FROM comments WHERE id = ?`).run(cid);
+      });
+      res.json({ ok: true });
     });
     app2.post("/api/posts/:id/favorite", auth, async (req, res) => {
       const post = await db.prepare(`SELECT id FROM posts WHERE id = ?`).get(req.params.id);
@@ -54346,9 +55543,11 @@ var require_server = __commonJS({
       res.json(posts);
     });
     app2.post("/api/reports", auth, async (req, res) => {
-      const { postId, commentId, reason } = req.body;
-      if (!reason) return res.status(400).json({ error: "\u8BF7\u586B\u5199\u4E3E\u62A5\u539F\u56E0" });
-      await db.prepare(`INSERT INTO reports (post_id, comment_id, user_id, reason) VALUES (?, ?, ?, ?) RETURNING id`).run(postId || null, commentId || null, req.user.dbId, reason);
+      const { postId, commentId, reason, reportedUid } = req.body;
+      if (!reason || !String(reason).trim()) return res.status(400).json({ error: "\u8BF7\u586B\u5199\u4E3E\u62A5\u539F\u56E0" });
+      if (!postId && !commentId && !reportedUid) return res.status(400).json({ error: "\u8BF7\u9009\u62E9\u4E3E\u62A5\u5BF9\u8C61" });
+      if (reportedUid && reportedUid === req.user.uid) return res.status(400).json({ error: "\u4E0D\u80FD\u4E3E\u62A5\u81EA\u5DF1" });
+      await db.prepare(`INSERT INTO reports (post_id, comment_id, user_id, reason, reported_uid) VALUES (?, ?, ?, ?, ?) RETURNING id`).run(postId || null, commentId || null, req.user.dbId, String(reason).trim(), reportedUid || null);
       res.json({ ok: true, message: "\u4E3E\u62A5\u5DF2\u63D0\u4EA4\uFF0C\u7BA1\u7406\u5458\u4F1A\u5C3D\u5FEB\u5904\u7406" });
     });
     app2.get("/api/notifications", auth, async (req, res) => {
@@ -54371,7 +55570,7 @@ var require_server = __commonJS({
       if (!req.file) return res.status(400).json({ error: "\u8BF7\u4E0A\u4F20\u56FE\u7247" });
       let url;
       try {
-        url = await fileStorage.saveFile(req.file.path, `avatars/${Date.now()}-${req.file.filename}`);
+        url = await fileStorage.saveFile(req.file, `avatars/${Date.now()}-${req.file.originalname}`);
       } catch (e) {
         console.error("\u5934\u50CF\u4E0A\u4F20\u5931\u8D25:", e.message);
         return res.status(500).json({ error: "\u5934\u50CF\u4E0A\u4F20\u5931\u8D25" });
@@ -54435,10 +55634,14 @@ var require_server = __commonJS({
       ).all(req.user.uid, req.user.uid);
       const peers = [];
       const map = /* @__PURE__ */ new Map();
+      const blockedRows = await db.prepare(`SELECT blocked_uid FROM blocks WHERE blocker_uid = ?`).all(req.user.uid);
+      const blockedSet = new Set(blockedRows.map((r) => r.blocked_uid));
       for (const m of rows) {
         const peer = m.from_uid === req.user.uid ? m.to_uid : m.from_uid;
+        if (blockedSet.has(peer)) continue;
         if (!map.has(peer)) {
-          map.set(peer, { uid: peer, last_content: m.content, last_time: m.created_at, unread: 0 });
+          const preview = m.content || (m.share_type ? m.share_type === "post" ? "[\u5206\u4EAB\u7684\u5E16\u5B50]" : m.share_type === "profile" ? "[\u5206\u4EAB\u7684\u4E3B\u9875]" : "[\u5206\u4EAB]" : m.media ? "[\u56FE\u7247/\u89C6\u9891/\u8BED\u97F3]" : "");
+          map.set(peer, { uid: peer, last_content: preview, last_time: m.created_at, unread: 0 });
           peers.push(peer);
         }
         if (m.to_uid === req.user.uid && m.from_uid === peer && !m.read) map.get(peer).unread += 1;
@@ -54462,51 +55665,71 @@ var require_server = __commonJS({
       if (!peer) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
       await db.prepare(`UPDATE messages SET read = TRUE WHERE from_uid = ? AND to_uid = ? AND read = FALSE`).run(peerUid, req.user.uid);
       const list = await db.prepare(
-        `SELECT id, from_uid, to_uid, content, read, created_at FROM messages
+        `SELECT id, from_uid, to_uid, content, media, share_type, share_id, read, created_at FROM messages
      WHERE (from_uid = ? AND to_uid = ?) OR (from_uid = ? AND to_uid = ?)
      ORDER BY id ASC`
       ).all(req.user.uid, peerUid, peerUid, req.user.uid);
+      list.forEach((m) => {
+        m.media = parseMedia(m.media);
+      });
       res.json(list);
     });
+    app2.post("/api/messages/read/:uid", auth, async (req, res) => {
+      await db.prepare(`UPDATE messages SET read = TRUE WHERE from_uid = ? AND to_uid = ? AND read = FALSE`).run(req.params.uid, req.user.uid);
+      res.json({ ok: true });
+    });
     app2.post("/api/messages", auth, async (req, res) => {
-      const { to, content } = req.body;
+      const { to, content, shareType, shareId } = req.body;
+      const media = parseMedia(req.body.media);
+      const share = shareType && shareId ? { type: String(shareType), id: String(shareId) } : null;
       if (!to) return res.status(400).json({ error: "\u8BF7\u9009\u62E9\u63A5\u6536\u8005" });
-      if (!content || !String(content).trim()) return res.status(400).json({ error: "\u6D88\u606F\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A" });
+      if ((!content || !String(content).trim()) && media.length === 0 && !share) {
+        return res.status(400).json({ error: "\u6D88\u606F\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A" });
+      }
       if (to === req.user.uid) return res.status(400).json({ error: "\u4E0D\u80FD\u7ED9\u81EA\u5DF1\u53D1\u79C1\u4FE1" });
       const peer = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(to);
       if (!peer) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
-      const text = String(content).trim();
+      const blocked = await db.prepare(
+        `SELECT id FROM blocks WHERE (blocker_uid = ? AND blocked_uid = ?) OR (blocker_uid = ? AND blocked_uid = ?)`
+      ).get(req.user.uid, to, to, req.user.uid);
+      if (blocked) return res.status(403).json({ error: "\u7531\u4E8E\u62C9\u9ED1\u5173\u7CFB\uFF0C\u65E0\u6CD5\u53D1\u9001\u79C1\u4FE1" });
+      const text = String(content || "").trim();
       const result = await db.prepare(
-        `INSERT INTO messages (from_uid, to_uid, content) VALUES (?, ?, ?) RETURNING id`
-      ).run(req.user.uid, to, text);
-      await notify(peer.id, "message", req.user.uid, null, text.slice(0, 60));
+        `INSERT INTO messages (from_uid, to_uid, content, media, share_type, share_id) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+      ).run(req.user.uid, to, text, JSON.stringify(media), share ? share.type : null, share ? share.id : null);
+      const notifyText = text || (share ? share.type === "post" ? "\u5206\u4EAB\u4E86\u4E00\u4E2A\u5E16\u5B50" : "\u5206\u4EAB\u4E86\u4E3B\u9875" : "[\u56FE\u7247/\u89C6\u9891/\u8BED\u97F3]");
+      await notify(peer.id, "message", req.user.uid, share && share.type === "post" ? Number(share.id) : null, notifyText.slice(0, 60));
       res.json({ id: result.lastInsertRowid });
     });
     app2.get("/api/admin/whoami", adminAuth, (req, res) => {
       res.json({ role: req.adminRole || "admin" });
     });
-    app2.post("/api/admin/notify", adminAuth, async (req, res) => {
-      const { uids, all, content } = req.body;
+    app2.post("/api/admin/notify", superAuth, async (req, res) => {
+      const { uids, all, content, image, badgeText, badgeColor } = req.body;
       if (!content || !String(content).trim()) return res.status(400).json({ error: "\u901A\u77E5\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A" });
       const text = String(content).trim();
+      const img = image ? String(image) : null;
+      const badge = badgeText ? String(badgeText).slice(0, 20) : null;
+      const badgeClr = badgeColor ? String(badgeColor).slice(0, 30) : null;
       let sent = 0;
       if (all) {
         const result = await db.prepare(
-          `INSERT INTO notifications (user_id, type, from_user, content)
-       SELECT id, 'system', 'system', ? FROM users RETURNING id`
-        ).run(text);
+          `INSERT INTO notifications (user_id, type, from_user, content, image, badge_text, badge_color)
+       SELECT id, 'system', 'system', ?, ?, ?, ? FROM users RETURNING id`
+        ).run(text, img, badge, badgeClr);
         sent = result.changes;
       } else {
         if (!Array.isArray(uids) || uids.length === 0) return res.status(400).json({ error: "\u8BF7\u63D0\u4F9B\u63A5\u6536\u7528\u6237 uid" });
         for (const uid of uids) {
           if (typeof uid !== "string" || !uid.trim()) continue;
           const result = await db.prepare(
-            `INSERT INTO notifications (user_id, type, from_user, content)
-         SELECT id, 'system', 'system', ? FROM users WHERE uid = ? RETURNING id`
-          ).run(text, uid.trim());
+            `INSERT INTO notifications (user_id, type, from_user, content, image, badge_text, badge_color)
+         SELECT id, 'system', 'system', ?, ?, ?, ? FROM users WHERE uid = ? RETURNING id`
+          ).run(text, img, badge, badgeClr, uid.trim());
           sent += result.changes;
         }
       }
+      await logAdminAction(req, "send_notification", "notification", all ? "all" : (uids || []).join(","), text.slice(0, 100), badge || "");
       res.json({ sent });
     });
     app2.get("/api/admin/posts", adminAuth, async (req, res) => {
@@ -54520,14 +55743,16 @@ var require_server = __commonJS({
       }
       const total = (await db.prepare(`SELECT COUNT(*) as c FROM posts p ${where}`).get(...params)).c;
       const posts = await db.prepare(
-        `SELECT p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
-            p.is_anonymous, p.nickname, p.client_ip, p.user_agent, p.is_staff, p.staff_role,
+        `SELECT p.id, p.category, p.content, p.tags, p.images, p.media, p.status, p.review_note,
+            p.likes, p.views, p.created_at, p.quote_post_id, p.activity_signup_required,
+            p.is_anonymous, p.is_hot, p.nickname, p.client_ip, p.user_agent, p.is_staff, p.staff_role,
             CASE WHEN p.user_id IS NULL THEN NULL ELSE u.uid END AS user_id
      FROM posts p LEFT JOIN users u ON u.id = p.user_id
      ${where} ORDER BY p.id DESC LIMIT ? OFFSET ?`
       ).all(...params, Number(pageSize), offset);
       posts.forEach((p) => {
         p.images = p.images ? JSON.parse(p.images) : [];
+        p.media = parseMedia(p.media);
         p.tags = p.tags ? JSON.parse(p.tags) : [];
       });
       res.json({ total, posts });
@@ -54536,6 +55761,7 @@ var require_server = __commonJS({
       const post = await db.prepare(`SELECT * FROM posts WHERE id = ?`).get(req.params.id);
       if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
       post.images = post.images ? JSON.parse(post.images) : [];
+      post.media = parseMedia(post.media);
       post.tags = post.tags ? JSON.parse(post.tags) : [];
       const authorId = post.user_id;
       const author = authorId ? await db.prepare(
@@ -54544,9 +55770,19 @@ var require_server = __commonJS({
       ).get(authorId) : null;
       post.user_id = author ? author.uid : null;
       const commentCount = (await db.prepare(`SELECT COUNT(*) as c FROM comments WHERE post_id = ?`).get(req.params.id)).c;
+      const comments = await db.prepare(
+        `SELECT c.id, c.parent_id, c.content, c.media, c.nickname, c.created_at, c.likes,
+            CASE WHEN c.user_id IS NULL THEN NULL ELSE u.uid END AS user_id
+     FROM comments c LEFT JOIN users u ON u.id = c.user_id
+     WHERE c.post_id = ? ORDER BY c.id ASC`
+      ).all(req.params.id);
+      comments.forEach((c) => {
+        c.media = parseMedia(c.media);
+      });
       res.json({
         post,
         author,
+        comments,
         stats: { comments: commentCount, likes: post.likes },
         is_anonymous: !!post.is_anonymous,
         client_ip: post.client_ip || "",
@@ -54554,14 +55790,61 @@ var require_server = __commonJS({
       });
     });
     app2.put("/api/admin/posts/:id", adminAuth, async (req, res) => {
-      const { status } = req.body;
-      if (!["approved", "rejected", "pending"].includes(status)) return res.status(400).json({ error: "\u65E0\u6548\u72B6\u6001" });
-      await db.prepare(`UPDATE posts SET status = ? WHERE id = ?`).run(status, req.params.id);
+      const { status, is_hot, note, reason } = req.body || {};
+      const noteText = typeof note === "string" ? note : typeof reason === "string" ? reason : void 0;
+      const target = await db.prepare(`SELECT id, user_id, content, review_note FROM posts WHERE id = ?`).get(req.params.id);
+      if (!target) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
+      const sets = [];
+      const params = [];
+      if (status !== void 0) {
+        if (!["approved", "rejected", "pending"].includes(status)) return res.status(400).json({ error: "\u65E0\u6548\u72B6\u6001" });
+        sets.push("status = ?");
+        params.push(status);
+      }
+      if (noteText !== void 0) {
+        sets.push("review_note = ?");
+        params.push(noteText.slice(0, 500));
+      }
+      if (is_hot !== void 0) {
+        if (is_hot === true || is_hot === "true" || is_hot === 1) {
+          const post = await db.prepare(`SELECT status FROM posts WHERE id = ?`).get(req.params.id);
+          if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
+          if (post.status !== "approved") return res.status(400).json({ error: "\u4EC5\u5DF2\u901A\u8FC7\u7684\u5E16\u5B50\u53EF\u8BBE\u4E3A\u70ED\u95E8" });
+        }
+        sets.push("is_hot = ?");
+        params.push(is_hot === true || is_hot === "true" || is_hot === 1);
+      }
+      if (sets.length === 0) return res.json({ ok: true });
+      params.push(req.params.id);
+      await db.prepare(`UPDATE posts SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+      if (status !== void 0 && target.user_id) {
+        const reasonText = noteText !== void 0 ? noteText : target.review_note || "";
+        if (status === "rejected") {
+          await notify(
+            target.user_id,
+            "system",
+            "system",
+            target.id,
+            `\u4F60\u7684\u5E16\u5B50\u672A\u901A\u8FC7\u5BA1\u6838${reasonText ? `\uFF0C\u7406\u7531\uFF1A${reasonText}` : ""}`
+          );
+        } else if (status === "approved") {
+          await notify(target.user_id, "system", "system", target.id, "\u4F60\u7684\u5E16\u5B50\u5DF2\u901A\u8FC7\u5BA1\u6838\uFF0C\u73B0\u5DF2\u516C\u5F00\u663E\u793A");
+        }
+      }
+      await logAdminAction(
+        req,
+        status === "rejected" ? "reject_post" : status === "approved" ? "approve_post" : "update_post",
+        "post",
+        target.id,
+        noteText !== void 0 ? noteText : "",
+        (target.content || "").slice(0, 60)
+      );
       res.json({ ok: true });
     });
     app2.delete("/api/admin/posts/:id", superAuth, async (req, res) => {
       if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
-      const post = await db.prepare(`SELECT id, user_id, category, content, images FROM posts WHERE id = ?`).get(req.params.id);
+      const reason = String(req.body && req.body.reason || req.query.reason || "").trim();
+      const post = await db.prepare(`SELECT id, user_id, category, content, images, media FROM posts WHERE id = ?`).get(req.params.id);
       if (!post) return res.status(404).json({ error: "\u5E16\u5B50\u4E0D\u5B58\u5728" });
       let authorName = "\u5DF2\u6CE8\u9500\u7528\u6237";
       if (post.user_id) {
@@ -54577,6 +55860,23 @@ var require_server = __commonJS({
           }
         }
       }
+      for (const m of parseMedia(post.media)) {
+        try {
+          await fileStorage.deleteByUrl(m.url, uploadsDir);
+        } catch (e) {
+          console.error("[admin] \u5A92\u4F53\u6E05\u7406\u5931\u8D25:", e.message);
+        }
+      }
+      const notifyAuthor = async () => {
+        if (!post.user_id) return;
+        await notify(
+          post.user_id,
+          "system",
+          "system",
+          null,
+          `\u4F60\u7684\u5E16\u5B50\u5DF2\u88AB\u5220\u9664\uFF0C\u7406\u7531\uFF1A${reason || "\u8FDD\u53CD\u793E\u533A\u89C4\u8303"}\uFF08\u539F\u5E16\u5185\u5BB9\uFF1A${(post.content || "").slice(0, 40)}\uFF09`
+        );
+      };
       if (post.user_id) {
         const penalty = await penalizeAndMaybeBan(post.user_id, 10);
         await logAlert(`\u8D85\u7EA7\u7BA1\u7406\u5458\u5220\u9664\u5E16\u5B50 #${post.id}\uFF08\u5206\u7C7B\uFF1A${post.category}\uFF0C\u4F5C\u8005\uFF1A${authorName}\uFF09`);
@@ -54585,6 +55885,8 @@ var require_server = __commonJS({
           await tx.prepare(`DELETE FROM notifications WHERE post_id = ?`).run(req.params.id);
           await tx.prepare(`DELETE FROM posts WHERE id = ?`).run(req.params.id);
         });
+        await notifyAuthor();
+        await logAdminAction(req, "delete_post", "post", post.id, reason, (post.content || "").slice(0, 60));
         return res.json({ ok: true, message: "\u5E16\u5B50\u53CA\u5173\u8054\u6570\u636E\u5DF2\u5220\u9664", reputation: penalty ? penalty.reputation : null });
       }
       await db.transaction(async (tx) => {
@@ -54592,9 +55894,10 @@ var require_server = __commonJS({
         await tx.prepare(`DELETE FROM notifications WHERE post_id = ?`).run(req.params.id);
         await tx.prepare(`DELETE FROM posts WHERE id = ?`).run(req.params.id);
       });
+      await logAdminAction(req, "delete_post", "post", post.id, reason, (post.content || "").slice(0, 60));
       res.json({ ok: true, message: "\u5E16\u5B50\u53CA\u5173\u8054\u6570\u636E\u5DF2\u5220\u9664" });
     });
-    app2.get("/api/admin/stats", adminAuth, async (req, res) => {
+    app2.get("/api/admin/stats", superAuth, async (req, res) => {
       const totalPosts = (await db.prepare(`SELECT COUNT(*) as c FROM posts`).get()).c;
       const approvedPosts = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE status='approved'`).get()).c;
       const pendingPosts = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE status='pending'`).get()).c;
@@ -54605,18 +55908,30 @@ var require_server = __commonJS({
       res.json({ totalPosts, approvedPosts, pendingPosts, totalUsers, totalComments, pendingReports, hotPosts });
     });
     app2.get("/api/admin/reports", adminAuth, async (req, res) => {
+      const status = String(req.query.status || "pending");
+      const where = status === "all" ? "" : "WHERE r.status = ?";
+      const params = status === "all" ? [] : [status];
       const reports = await db.prepare(`
-    SELECT r.*, p.content as post_content, p.category as post_category
-    FROM reports r LEFT JOIN posts p ON r.post_id = p.id
-    ORDER BY r.id DESC LIMIT 100
-  `).all();
+    SELECT r.*, p.content as post_content, p.category as post_category, c.content as comment_content,
+           (SELECT nickname FROM users WHERE id = r.user_id) AS reporter_nickname,
+           (SELECT username FROM users WHERE id = r.user_id) AS reporter_username
+    FROM reports r
+    LEFT JOIN posts p ON r.post_id = p.id
+    LEFT JOIN comments c ON r.comment_id = c.id
+    ${where}
+    ORDER BY r.id DESC LIMIT 200
+  `).all(...params);
       res.json(reports);
     });
     app2.put("/api/admin/reports/:id", adminAuth, async (req, res) => {
-      const { status } = req.body;
-      const report = await db.prepare(`SELECT id, post_id, comment_id, status FROM reports WHERE id = ?`).get(req.params.id);
+      const { status, note } = req.body;
+      const allowed = ["pending", "resolved", "valid", "invalid", "ignored"];
+      if (!allowed.includes(status)) return res.status(400).json({ error: "\u65E0\u6548\u7684\u4E3E\u62A5\u5904\u7406\u72B6\u6001" });
+      const noteText = note ? String(note).slice(0, 500) : "";
+      const report = await db.prepare(`SELECT id, post_id, comment_id, user_id, status FROM reports WHERE id = ?`).get(req.params.id);
       if (!report) return res.status(404).json({ error: "\u4E3E\u62A5\u4E0D\u5B58\u5728" });
-      await db.prepare(`UPDATE reports SET status = ? WHERE id = ?`).run(status, req.params.id);
+      const adminName = req.adminUser ? req.adminUser.nickname || req.adminUser.uid : "\u8D85\u7BA1\u53E3\u4EE4";
+      await db.prepare(`UPDATE reports SET status = ?, handle_note = ?, handled_by = ?, handled_at = ${NOW_TEXT} WHERE id = ?`).run(status, noteText, adminName, req.params.id);
       let reputation = null;
       const effective = status === "valid" || status === "resolved";
       const wasEffective = report.status === "valid" || report.status === "resolved";
@@ -54632,9 +55947,14 @@ var require_server = __commonJS({
           reputation = r ? r.reputation : null;
         }
       }
+      const statusLabel = { pending: "\u5F85\u5904\u7406", resolved: "\u5DF2\u5904\u7406", valid: "\u4E3E\u62A5\u6709\u6548", invalid: "\u4E3E\u62A5\u65E0\u6548", ignored: "\u5DF2\u5FFD\u7565" }[status] || status;
+      if (report.user_id) {
+        await notify(report.user_id, "system", "system", report.post_id, `\u4F60\u7684\u4E3E\u62A5\u5DF2\u5904\u7406\uFF1A${statusLabel}${noteText ? `\uFF0C\u7406\u7531\uFF1A${noteText}` : ""}`);
+      }
+      await logAdminAction(req, `handle_report_${status}`, "report", report.id, noteText, statusLabel);
       res.json({ ok: true, reputation });
     });
-    app2.get("/api/admin/users", adminAuth, async (req, res) => {
+    app2.get("/api/admin/users", superAuth, async (req, res) => {
       try {
         const graded = await db.prepare(`SELECT id, grade FROM users WHERE grade_set_by_admin = TRUE AND grade IS NOT NULL`).all();
         for (const u of graded) {
@@ -54644,22 +55964,101 @@ var require_server = __commonJS({
       } catch (e) {
         console.error("[tag-refresh] \u5931\u8D25:", e.message);
       }
-      const isSuper = req.adminRole === "super";
-      const select = isSuper ? `uid, username, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
-       grade, tag, grade_set_by_admin, latitude, longitude` : `uid, username, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
-       grade, tag, grade_set_by_admin`;
-      const users = await db.prepare(`SELECT ${select} FROM users ORDER BY id DESC`).all();
-      res.json(users);
+      const select = `uid, username, password_hash, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
+       grade, tag, grade_set_by_admin, custom_tag, tag_color, coins, latitude, longitude,
+       real_name, class_name, address, email, wechat, qq, phone, bio`;
+      try {
+        const users = await db.prepare(`SELECT ${select} FROM users ORDER BY id DESC`).all();
+        res.json(users);
+      } catch (e) {
+        console.error("[admin-users] error:", e.message, e.stack);
+        res.status(500).json({ error: e.message });
+      }
+    });
+    app2.get("/api/admin/users/:uid/detail", superAuth, async (req, res) => {
+      try {
+        const u = await db.prepare(
+          `SELECT id, uid, username, password_hash, password_enc, nickname, avatar, bio, role, reputation,
+              banned, banned_reason, banned_at, created_at, agreed_at, profile_public, show_uid,
+              grade, tag, grade_set_by_admin, custom_tag, tag_color, coins, latitude, longitude,
+              real_name, class_name, address, email, wechat, qq, phone,
+              show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone
+       FROM users WHERE uid = ?`
+        ).get(req.params.uid);
+        if (!u) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
+        const password_plain = decryptPassword(u.password_enc);
+        const posts = await db.prepare(
+          `SELECT id, category, content, tags, images, media, status, review_note, is_anonymous, likes, views, created_at
+       FROM posts WHERE user_id = ? ORDER BY id DESC LIMIT 200`
+        ).all(u.id);
+        posts.forEach((p) => {
+          try {
+            p.images = p.images ? JSON.parse(p.images) : [];
+          } catch {
+            p.images = [];
+          }
+          try {
+            p.media = parseMedia(p.media);
+          } catch {
+            p.media = [];
+          }
+          try {
+            p.tags = p.tags ? JSON.parse(p.tags) : [];
+          } catch {
+            p.tags = [];
+          }
+        });
+        const comments = await db.prepare(
+          `SELECT c.id, c.post_id, c.content, c.created_at, c.parent_id,
+              p.content AS post_content
+       FROM comments c LEFT JOIN posts p ON p.id = c.post_id
+       WHERE c.user_id = ? ORDER BY c.id DESC LIMIT 500`
+        ).all(u.id);
+        const { password_enc, password_hash, ...user } = u;
+        res.json({ user, password_plain, password_recoverable: !!u.password_enc, password_hash, posts, comments });
+      } catch (e) {
+        console.error("[admin-user-detail] error:", e.message, e.stack);
+        res.status(500).json({ error: e.message });
+      }
+    });
+    app2.post("/api/admin/users/:uid/reputation", superAuth, async (req, res) => {
+      try {
+        const u = await db.prepare(`SELECT id, banned, banned_reason FROM users WHERE uid = ?`).get(req.params.uid);
+        if (!u) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
+        let value = req.body && req.body.reputation !== void 0 ? Number(req.body.reputation) : 100;
+        if (!Number.isFinite(value)) return res.status(400).json({ error: "\u4FE1\u8A89\u5206\u65E0\u6548" });
+        value = Math.max(0, Math.min(1e3, Math.round(value)));
+        const sets = ["reputation = ?"];
+        const params = [value];
+        let unbanned = false;
+        if (value > 0 && u.banned && u.banned_reason === "\u4FE1\u8A89\u5206\u5F52\u96F6") {
+          sets.push("banned = FALSE", "banned_reason = NULL", "banned_at = NULL", "banned_info = NULL");
+          unbanned = true;
+        }
+        params.push(u.id);
+        await db.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+        res.json({ ok: true, uid: req.params.uid, reputation: value, unbanned });
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
     });
     app2.put("/api/admin/users/:id", superAuth, async (req, res) => {
-      const { role } = req.body;
-      if (!["user", "admin", "super"].includes(role)) return res.status(400).json({ error: "\u65E0\u6548\u89D2\u8272" });
-      await db.prepare(`UPDATE users SET role = ? WHERE uid = ?`).run(role, req.params.id);
-      res.json({ ok: true });
+      try {
+        const { role } = req.body || {};
+        if (!["user", "admin", "super"].includes(role)) return res.status(400).json({ error: "\u65E0\u6548\u89D2\u8272" });
+        await db.prepare(`UPDATE users SET role = ? WHERE uid = ?`).run(role, req.params.id);
+        res.json({ ok: true });
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
     });
     app2.delete("/api/admin/users/:id", superAuth, async (req, res) => {
-      await db.prepare(`DELETE FROM users WHERE uid = ?`).run(req.params.id);
-      res.json({ ok: true });
+      try {
+        await db.prepare(`DELETE FROM users WHERE uid = ?`).run(req.params.id);
+        res.json({ ok: true });
+      } catch (e) {
+        res.status(500).json({ error: e.message });
+      }
     });
     app2.post("/api/applications", auth, upload.array("images", 9), async (req, res) => {
       const { content } = req.body;
@@ -54668,7 +56067,7 @@ var require_server = __commonJS({
       let images = [];
       try {
         for (const f of req.files || []) {
-          images.push(await fileStorage.saveFile(f.path, `applications/${Date.now()}-${f.filename}`));
+          images.push(await fileStorage.saveFile(f, `applications/${Date.now()}-${f.originalname}`));
         }
       } catch (e) {
         console.error("\u7533\u8BF7\u56FE\u7247\u4E0A\u4F20\u5931\u8D25:", e.message);
@@ -54687,20 +56086,19 @@ var require_server = __commonJS({
       });
       res.json(list);
     });
-    app2.get("/api/admin/applications", adminAuth, async (req, res) => {
+    app2.get("/api/admin/applications", superAuth, async (req, res) => {
       const { status } = req.query;
-      const isSuper = req.adminRole === "super";
       let where = "";
       const params = [];
       if (status && status !== "all") {
         where = "WHERE a.status = ?";
         params.push(status);
       }
-      const extraCols = isSuper ? `, u.latitude, u.longitude, u.address, u.email, u.wechat, u.qq, u.phone, u.bio` : "";
       const list = await db.prepare(
         `SELECT a.id, a.content, a.images, a.status, a.admin_note, a.created_at,
             u.uid, u.nickname, u.username, u.avatar, u.real_name, u.class_name,
-            u.grade, u.tag, u.grade_set_by_admin${extraCols}
+            u.grade, u.tag, u.grade_set_by_admin,
+            u.latitude, u.longitude, u.address, u.email, u.wechat, u.qq, u.phone, u.bio
      FROM applications a JOIN users u ON u.id = a.user_id
      ${where} ORDER BY a.id DESC LIMIT 200`
       ).all(...params);
@@ -54709,7 +56107,7 @@ var require_server = __commonJS({
       });
       res.json(list);
     });
-    app2.put("/api/admin/applications/:id", adminAuth, async (req, res) => {
+    app2.put("/api/admin/applications/:id", superAuth, async (req, res) => {
       const { status, admin_note } = req.body;
       const sets = [];
       const params = [];
@@ -54726,35 +56124,40 @@ var require_server = __commonJS({
       await db.prepare(`UPDATE applications SET ${sets.join(", ")} WHERE id = ?`).run(...params);
       res.json({ ok: true });
     });
-    app2.put("/api/admin/users/:uid/profile", adminAuth, async (req, res) => {
-      const target = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(req.params.uid);
-      if (!target) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
-      const fields = ["nickname", "real_name", "class_name", "address", "email", "wechat", "qq", "phone", "bio"];
-      const sets = [];
-      const params = [];
-      for (const f of fields) {
-        if (req.body[f] !== void 0) {
-          sets.push(`${f} = ?`);
-          params.push(req.body[f] === null ? "" : String(req.body[f]));
+    app2.put("/api/admin/users/:uid/profile", superAuth, async (req, res) => {
+      try {
+        const target = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(req.params.uid);
+        if (!target) return res.status(404).json({ error: "\u7528\u6237\u4E0D\u5B58\u5728" });
+        const fields = ["nickname", "real_name", "class_name", "address", "email", "wechat", "qq", "phone", "bio"];
+        const sets = [];
+        const params = [];
+        for (const f of fields) {
+          if (req.body[f] !== void 0) {
+            sets.push(`${f} = ?`);
+            params.push(req.body[f] === null ? "" : String(req.body[f]));
+          }
         }
+        if (req.body.grade !== void 0) {
+          const g = req.body.grade === "" || req.body.grade == null ? null : Number(req.body.grade);
+          sets.push("grade = ?");
+          params.push(g);
+          sets.push("grade_set_by_admin = ?");
+          params.push(g != null);
+        }
+        if (req.body.tag !== void 0) {
+          const t = ["graduate", "student", null, ""].includes(req.body.tag) ? req.body.tag || null : null;
+          sets.push("tag = ?");
+          params.push(t);
+        }
+        if (sets.length === 0) return res.json({ ok: true });
+        params.push(target.id);
+        await db.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+        if (req.body.grade !== void 0) await refreshUserTag(target.id);
+        res.json({ ok: true });
+      } catch (e) {
+        console.error("[admin-profile-update] error:", e.message, e.stack);
+        res.status(500).json({ error: e.message });
       }
-      if (req.body.grade !== void 0) {
-        const g = req.body.grade === "" || req.body.grade == null ? null : Number(req.body.grade);
-        sets.push("grade = ?");
-        params.push(g);
-        sets.push("grade_set_by_admin = ?");
-        params.push(g != null);
-      }
-      if (req.body.tag !== void 0) {
-        const t = ["graduate", "student", null, ""].includes(req.body.tag) ? req.body.tag || null : null;
-        sets.push("tag = ?");
-        params.push(t);
-      }
-      if (sets.length === 0) return res.json({ ok: true });
-      params.push(target.id);
-      await db.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`).run(...params);
-      if (req.body.grade !== void 0) await refreshUserTag(target.id);
-      res.json({ ok: true });
     });
     app2.post("/api/admin/users/:uid/ban", superAuth, async (req, res) => {
       const reason = (req.body && req.body.reason ? String(req.body.reason).trim() : "") || "\u8FDD\u53CD\u793E\u533A\u89C4\u8303";
@@ -54844,11 +56247,46 @@ var require_server = __commonJS({
     app2.get("/health", (req, res) => {
       res.json({ status: "ok", time: (/* @__PURE__ */ new Date()).toISOString() });
     });
+    try {
+      require_features().register({
+        app: app2,
+        db,
+        auth,
+        adminAuth,
+        superAuth,
+        mediaUpload,
+        upload,
+        fileStorage,
+        uploadsDir,
+        notify,
+        NOW_TEXT,
+        logAdminAction,
+        getCurrentUser,
+        parseMedia,
+        mediaKind
+      });
+    } catch (e) {
+      console.error("[features] \u8DEF\u7531\u52A0\u8F7D\u5931\u8D25:", e.message, e.stack);
+    }
+    app2.use((err, req, res, next) => {
+      const msg = err && err.message ? err.message : String(err);
+      console.error("[unhandled-error]", req.method, req.url, msg, err && err.stack);
+      if (res.headersSent) return next(err);
+      res.status(err.status || 500).json({ error: msg });
+    });
     var clientDist = path.join(__dirname, "..", "client", "dist");
     if (fs.existsSync(clientDist)) {
-      app2.use(express.static(clientDist));
+      app2.use(express.static(clientDist, {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith(".html") || filePath.endsWith("version.json")) {
+            res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+            res.setHeader("Pragma", "no-cache");
+          }
+        }
+      }));
       app2.use((req, res, next) => {
         if (req.path.startsWith("/api") || req.path.startsWith("/uploads")) return next();
+        res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
         res.sendFile(path.join(clientDist, "index.html"));
       });
     }
@@ -54866,6 +56304,7 @@ var require_server = __commonJS({
     }
     module2.exports = app2;
     module2.exports.ready = db.ready;
+    module2.exports.db = db;
   }
 });
 

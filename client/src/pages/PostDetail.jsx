@@ -2,6 +2,90 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api, EMOJIS } from '../api.js';
 import { useAuth } from '../AuthContext.jsx';
+import MediaView from '../components/MediaView.jsx';
+import StickerPicker from '../components/StickerPicker.jsx';
+import RecordButton from '../components/RecordButton.jsx';
+import ForwardModal from '../components/ForwardModal.jsx';
+
+function Composer({ placeholder, onSubmit, autoFocus = false, compact = false }) {
+  const [text, setText] = useState('');
+  const [media, setMedia] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [showSticker, setShowSticker] = useState(false);
+  const [showEmoji, setShowEmoji] = useState(false);
+
+  const uploadFiles = async (files) => {
+    if (!files || files.length === 0) return;
+    setBusy(true);
+    try {
+      const up = await api.uploadMedia(Array.from(files).slice(0, 9 - media.length));
+      setMedia((prev) => [...prev, ...(up.files || [])].slice(0, 9));
+    } catch (e) { alert(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const send = async (e) => {
+    e?.preventDefault();
+    if (!text.trim() && media.length === 0) return;
+    setBusy(true);
+    try {
+      await onSubmit(text.trim(), media);
+      setText('');
+      setMedia([]);
+      setShowSticker(false);
+    } catch (err) { alert(err.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className={`composer ${compact ? 'composer-compact' : ''}`}>
+      {media.length > 0 && (
+        <div className="composer-media">
+          {media.map((m, i) => (
+            <div key={i} className="composer-media-item">
+              {m.type === 'image' && <img src={m.url} alt="" />}
+              {m.type === 'video' && <video src={m.url} muted />}
+              {m.type === 'audio' && <span>🎙️ 语音</span>}
+              <button type="button" onClick={() => setMedia(media.filter((_, j) => j !== i))}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <form className="comment-form" onSubmit={send}>
+        <input
+          type="text"
+          autoFocus={autoFocus}
+          placeholder={placeholder}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        <button type="button" className="media-btn" onClick={() => setShowEmoji(!showEmoji)} title="表情">😊</button>
+        <button type="button" className="media-btn" onClick={() => setShowSticker(!showSticker)} title="表情包">🧩</button>
+        <label className="media-btn" title="图片/视频/语音">
+          🖼️
+          <input type="file" accept="image/*,video/*,audio/*" multiple hidden onChange={(e) => { uploadFiles(e.target.files); e.target.value = ''; }} />
+        </label>
+        <RecordButton onRecorded={(f) => uploadFiles([f])} disabled={busy} />
+        <button className="btn btn-primary" type="submit" disabled={busy || (!text.trim() && media.length === 0)}>
+          {busy ? '...' : '发送'}
+        </button>
+      </form>
+      {showEmoji && (
+        <div className="emoji-picker">
+          {EMOJIS.map((e, i) => (
+            <button key={i} type="button" onClick={() => { setText((c) => c + e); setShowEmoji(false); }}>{e}</button>
+          ))}
+        </div>
+      )}
+      {showSticker && (
+        <StickerPicker
+          onClose={() => setShowSticker(false)}
+          onPick={(url) => { setMedia((prev) => [...prev, { type: 'image', url }].slice(0, 9)); setShowSticker(false); }}
+        />
+      )}
+    </div>
+  );
+}
 
 export default function PostDetail() {
   const { id } = useParams();
@@ -10,21 +94,18 @@ export default function PostDetail() {
   const [post, setPost] = useState(null);
   const [comments, setComments] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [comment, setComment] = useState('');
-  const [submitLoading, setSubmitLoading] = useState(false);
   const [modalImg, setModalImg] = useState(null);
   const [liked, setLiked] = useState(false);
   const [favorited, setFavorited] = useState(false);
+  const [signedUp, setSignedUp] = useState(false);
   const [showReport, setShowReport] = useState(false);
   const [reportReason, setReportReason] = useState('');
   const [reportCommentId, setReportCommentId] = useState(null);
   const [replyTo, setReplyTo] = useState(null);
-  const [replyText, setReplyText] = useState('');
-  const [showEmoji, setShowEmoji] = useState(false);
+  const [forwarding, setForwarding] = useState(false);
   const isSuper = localStorage.getItem('admin_token') && sessionStorage.getItem('admin_role') === 'super';
   const isAdminLogged = !!localStorage.getItem('admin_token') && ['admin', 'super'].includes(sessionStorage.getItem('admin_role'));
 
-  // 评论者本人 / 帖主 / 管理员可删除评论
   const canDeleteComment = (c) => {
     if (isAdminLogged) return true;
     if (!user) return false;
@@ -50,6 +131,7 @@ export default function PostDetail() {
       setComments(data.comments);
       setLiked(data.liked);
       setFavorited(data.favorited);
+      setSignedUp(!!data.signedUp);
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
   };
@@ -73,28 +155,24 @@ export default function PostDetail() {
     } catch (e) { alert(e.message); }
   };
 
-  const submitComment = async (e) => {
-    e.preventDefault();
+  const toggleSignup = async () => {
     if (!user) { alert('请先登录'); navigate('/login'); return; }
-    if (!comment.trim()) return;
-    setSubmitLoading(true);
     try {
-      await api.addComment(id, comment);
-      setComment('');
-      load();
+      const r = signedUp ? await api.cancelSignupActivity(id) : await api.signupActivity(id);
+      setSignedUp(r.signedUp);
+      setPost((p) => ({ ...p, signup_count: r.count }));
     } catch (e) { alert(e.message); }
-    finally { setSubmitLoading(false); }
   };
 
-  const submitReply = async (parentId) => {
-    if (!user) { alert('请先登录'); navigate('/login'); return; }
-    if (!replyText.trim()) return;
-    try {
-      await api.addComment(id, replyText, parentId);
-      setReplyTo(null);
-      setReplyText('');
-      load();
-    } catch (e) { alert(e.message); }
+  const submitComment = async (text, media) => {
+    await api.addComment(id, text, null, media);
+    load();
+  };
+
+  const submitReply = async (parentId, text, media) => {
+    await api.addComment(id, text, parentId, media);
+    setReplyTo(null);
+    load();
   };
 
   const likeComment = async (cid) => {
@@ -110,7 +188,7 @@ export default function PostDetail() {
     if (!reportReason.trim()) { alert('请填写原因'); return; }
     try {
       await api.report(id, reportCommentId, reportReason);
-      alert('举报已提交');
+      alert('举报已提交，处理结果与理由会在通知中告知你');
       setShowReport(false);
       setReportReason('');
       setReportCommentId(null);
@@ -118,9 +196,10 @@ export default function PostDetail() {
   };
 
   const superDelete = async () => {
-    if (!confirm('确定以超级管理员身份删除该帖子？作者将被扣除 10 点信誉分，此操作不可恢复。')) return;
+    const reason = prompt('请填写删除理由（将通知作者并记入操作记录）：', '违反社区规范');
+    if (reason === null) return;
     try {
-      await api.adminDeletePost(id);
+      await api.adminDeletePost(id, reason);
       navigate('/');
     } catch (e) { alert(e.message); }
   };
@@ -128,7 +207,6 @@ export default function PostDetail() {
   if (loading) return <div className="page"><div className="container"><div className="loading">加载中...</div></div></div>;
   if (!post) return <div className="page"><div className="container"><div className="empty">帖子不存在</div></div></div>;
 
-  // Build nested comment tree
   const topLevel = comments.filter((c) => !c.parent_id || c.parent_id === 0);
   const repliesOf = (cid) => comments.filter((c) => c.parent_id === cid);
 
@@ -145,21 +223,45 @@ export default function PostDetail() {
               </span>
             )}
             {post.is_anonymous && <span className="anon-badge">匿名</span>}
+            {post.activity_signup_required && <span className="anon-badge">活动 · 需报名</span>}
             <span className="post-time">{post.created_at}</span>
           </div>
           <div className="post-content" style={{ fontSize: 16 }}>{post.content}</div>
+
+          {post.quote_post_id && (
+            <div className="quote-card" onClick={() => navigate(`/post/${post.quote_post_id}`)}>
+              <div className="quote-head">📎 引用 @{post.quote_nickname || '同学'} · {post.quote_category || '帖子'}</div>
+              <div className="quote-body">{post.quote_content?.slice(0, 160) || '（原帖内容已删除）'}</div>
+            </div>
+          )}
+
           {post.tags && post.tags.length > 0 && (
             <div>{post.tags.map((t, i) => <span key={i} className="tag-chip">#{t}</span>)}</div>
           )}
-          {post.images && post.images.length > 0 && (
-            <div className="post-images" style={{ marginTop: 14 }}>
-              {post.images.map((img, i) => (<img key={i} src={img} alt="" onClick={() => setModalImg(img)} />))}
+
+          <MediaView media={post.media} images={post.images} />
+
+          {post.activity_signup_required && (
+            <div className="activity-signup-box">
+              <div>
+                <div className="activity-signup-title">🎫 活动报名</div>
+                <div className="activity-signup-meta">
+                  {post.signup_count || 0} 人已报名
+                  {post.activity_signup_deadline ? ` · 截止 ${post.activity_signup_deadline}` : ''}
+                </div>
+              </div>
+              <button className={`btn ${signedUp ? 'btn-secondary' : 'btn-primary'}`} onClick={toggleSignup}>
+                {signedUp ? '取消报名' : '立即报名'}
+              </button>
             </div>
           )}
+
           <div className="post-footer">
             <button className={`post-action ${liked ? 'liked' : ''}`} onClick={handleLike}><span>{liked ? '❤️' : '🤍'}</span><span>{post.likes}</span></button>
             <button className={`post-action ${favorited ? 'liked' : ''}`} onClick={handleFavorite}><span>{favorited ? '⭐' : '☆'}</span><span>{favorited ? '已收藏' : '收藏'}</span></button>
             <span className="post-action"><span>👁️</span><span>{post.views}</span></span>
+            <button className="post-action" onClick={() => setForwarding(true)}><span>📤</span><span>转发</span></button>
+            <button className="post-action" onClick={() => navigate(`/create?quote=${post.id}`)}><span>✏️</span><span>引用发帖</span></button>
             <button className="post-action" onClick={() => { setReportCommentId(null); setShowReport(true); }}><span>🚩</span><span>举报</span></button>
             {isSuper && <button className="post-action" onClick={superDelete} style={{ color: 'var(--danger)' }}><span>🗑️</span><span>超管删除</span></button>}
             {!post.is_anonymous && post.user_id ? (
@@ -168,6 +270,7 @@ export default function PostDetail() {
                 <span className="post-avatar">
                   {post.avatar ? <img src={post.avatar} alt="" /> : (post.nickname || '?')[0]}
                 </span>
+                {post.custom_tag && <span className="user-custom-tag" style={{ color: post.tag_color || 'var(--primary)' }}>{post.custom_tag}</span>}
                 <span className="post-nick">@{post.nickname}</span>
               </span>
             ) : (
@@ -197,7 +300,8 @@ export default function PostDetail() {
                   )}
                   <span className="post-time">{c.created_at}</span>
                 </div>
-                <div className="comment-content">{c.content}</div>
+                {c.content && <div className="comment-content">{c.content}</div>}
+                <MediaView media={c.media} small />
                 <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
                   <button className="reply-link" onClick={() => likeComment(c.id)}>👍 {c.likes}</button>
                   <button className="reply-link" onClick={() => setReplyTo(replyTo === c.id ? null : c.id)}>回复</button>
@@ -206,10 +310,10 @@ export default function PostDetail() {
                   )}
                   <button className="reply-link" onClick={() => { setReportCommentId(c.id); setShowReport(true); }}>举报</button>
                 </div>
-                {replyTo === c.id && (
-                  <div className="reply-form">
-                    <input placeholder={`回复 @${c.nickname}...`} value={replyText} onChange={(e) => setReplyText(e.target.value)} autoFocus />
-                    <button className="btn btn-primary" style={{ padding: '6px 14px' }} onClick={() => submitReply(c.id)}>发送</button>
+                {replyTo === c.id && user && (
+                  <div className="reply-form reply-composer">
+                    <Composer compact placeholder={`回复 @${c.nickname}...`} autoFocus
+                      onSubmit={(text, media) => submitReply(c.id, text, media)} />
                   </div>
                 )}
                 {repliesOf(c.id).length > 0 && (
@@ -230,7 +334,8 @@ export default function PostDetail() {
                           )}
                           <span className="post-time">{r.created_at}</span>
                         </div>
-                        <div className="comment-content">{r.content}</div>
+                        {r.content && <div className="comment-content">{r.content}</div>}
+                        <MediaView media={r.media} small />
                         <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
                           <button className="reply-link" onClick={() => likeComment(r.id)}>👍 {r.likes}</button>
                           {canDeleteComment(r) && (
@@ -248,22 +353,17 @@ export default function PostDetail() {
           <p className="anon-hint" style={{ marginTop: 12 }}>
             {user ? `以「${user.nickname}」的身份评论` : '🔒 登录后即可评论、点赞、收藏'}
           </p>
-          <form className="comment-form" onSubmit={submitComment}>
-            <input type="text" placeholder={user ? '写下你的评论...' : '请先登录后再评论'} value={comment} onChange={(e) => setComment(e.target.value)} />
-            <button type="button" className="btn btn-secondary" style={{ padding: '0 12px' }} onClick={() => setShowEmoji(!showEmoji)}>😊</button>
-            <button className="btn btn-primary" type="submit" disabled={submitLoading || !comment.trim()}>{submitLoading ? '...' : '发送'}</button>
-          </form>
-          {showEmoji && (
-            <div className="emoji-picker">
-              {EMOJIS.map((e, i) => (
-                <button key={i} type="button" onClick={() => { setComment((c) => c + e); setShowEmoji(false); }}>{e}</button>
-              ))}
-            </div>
+          {user ? (
+            <Composer placeholder="写下你的评论，可发送图片 / 视频 / 语音 / 表情包..." onSubmit={submitComment} />
+          ) : (
+            <button className="btn btn-secondary btn-block" onClick={() => navigate('/login')}>登录后评论</button>
           )}
         </div>
       </div>
 
       {modalImg && <div className="image-modal" onClick={() => setModalImg(null)}><img src={modalImg} alt="" /></div>}
+
+      {forwarding && <ForwardModal share={{ type: 'post', id: post.id }} onClose={() => setForwarding(false)} />}
 
       {showReport && (
         <div className="modal-overlay" onClick={() => setShowReport(false)}>

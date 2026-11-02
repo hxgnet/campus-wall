@@ -2,6 +2,9 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { useAuth } from '../AuthContext.jsx';
+import MediaView from '../components/MediaView.jsx';
+import StickerPicker from '../components/StickerPicker.jsx';
+import RecordButton from '../components/RecordButton.jsx';
 
 export default function Messages() {
   const { uid } = useParams();
@@ -10,13 +13,15 @@ export default function Messages() {
   const [messages, setMessages] = useState([]);
   const [peer, setPeer] = useState(null);
   const [input, setInput] = useState('');
+  const [pending, setPending] = useState([]);
+  const [showSticker, setShowSticker] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [blocked, setBlocked] = useState(false);
   const [showReport, setShowReport] = useState(false);
   const [reason, setReason] = useState('');
   const bottomRef = useRef(null);
 
-  // 进入会话即拉取记录（服务端会把对方发来的消息标记已读）
   useEffect(() => {
     if (authLoading) return;
     if (!user) { navigate('/login'); return; }
@@ -25,9 +30,8 @@ export default function Messages() {
       .then(([u, list]) => { setPeer(u); setMessages(list); setBlocked(!!u.blocked_by_me); })
       .catch((e) => alert(e.message))
       .finally(() => setLoading(false));
-  }, [uid, user, navigate]);
+  }, [uid, user, navigate, authLoading]);
 
-  // 轮询刷新：对方看过后我的消息会变成「已读」
   useEffect(() => {
     if (!user) return undefined;
     const timer = setInterval(() => {
@@ -38,14 +42,49 @@ export default function Messages() {
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
+  const uploadFiles = async (files) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    try {
+      const up = await api.uploadMedia(Array.from(files));
+      setPending((prev) => [...prev, ...(up.files || [])]);
+    } catch (e) { alert(e.message); }
+    finally { setUploading(false); }
+  };
+
   const send = async (e) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() && pending.length === 0) return;
     try {
-      await api.sendMessage(uid, input.trim());
+      await api.sendMessage(uid, input.trim(), pending);
       setInput('');
+      setPending([]);
+      setShowSticker(false);
       setMessages(await api.getConversation(uid));
     } catch (err) { alert(err.message); }
+  };
+
+  const renderShare = (m) => {
+    if (!m.share_type) return null;
+    if (m.share_type === 'post') {
+      return (
+        <button type="button" className="share-card" onClick={() => navigate(`/post/${m.share_id}`)}>
+          <span className="share-card-icon">📎</span>
+          <span>分享的帖子</span>
+          <span className="share-card-go">查看 →</span>
+        </button>
+      );
+    }
+    if (m.share_type === 'profile') {
+      return (
+        <button type="button" className="share-card" onClick={() => navigate(`/profile/${m.share_id}`)}>
+          <span className="share-card-icon">👤</span>
+          <span>分享的个人主页</span>
+          <span className="share-card-go">查看 →</span>
+        </button>
+      );
+    }
+    return null;
   };
 
   const toggleBlock = async () => {
@@ -63,7 +102,7 @@ export default function Messages() {
       await api.reportUser(uid, reason.trim());
       setShowReport(false);
       setReason('');
-      alert('举报已提交，管理员会尽快处理');
+      alert('举报已提交，处理结果与理由会在通知中告知你');
     } catch (err) { alert(err.message); }
   };
 
@@ -72,7 +111,10 @@ export default function Messages() {
   return (
     <div className="page">
       <div className="container">
-        <button className="back-btn" onClick={() => navigate(-1)}>← 返回</button>
+        <div className="chat-top-links">
+          <button className="back-btn" onClick={() => navigate(-1)}>← 返回</button>
+          <button className="btn-text" onClick={() => navigate('/messages')}>💬 私信中心</button>
+        </div>
         <div className="chat-header">
           <div className="avatar">{peer?.avatar ? <img src={peer.avatar} alt="" /> : (peer?.nickname || '?')[0]}</div>
           <div style={{ flex: 1 }}>
@@ -89,7 +131,11 @@ export default function Messages() {
             messages.length === 0 ? <div className="search-hint">还没有消息，说点什么吧～</div> :
             messages.map((m) => (
               <div key={m.id} className={`chat-row ${m.from_uid === user.uid ? 'mine' : ''}`}>
-                <div className="chat-bubble">{m.content}</div>
+                <div className="chat-bubble">
+                  {m.content && <div>{m.content}</div>}
+                  {m.media && m.media.length > 0 && <MediaView media={m.media} small />}
+                  {renderShare(m)}
+                </div>
                 <div className="chat-time">
                   {m.created_at}
                   {m.from_uid === user.uid && <span style={{ marginLeft: 6, color: m.read ? 'var(--primary)' : 'var(--text-light)' }}>{m.read ? '已读' : '未读'}</span>}
@@ -99,7 +145,21 @@ export default function Messages() {
           }
           <div ref={bottomRef} />
         </div>
-        <form className="chat-form" onSubmit={send}>
+
+        {pending.length > 0 && (
+          <div className="composer-media">
+            {pending.map((m, i) => (
+              <div key={i} className="composer-media-item">
+                {m.type === 'image' && <img src={m.url} alt="" />}
+                {m.type === 'video' && <video src={m.url} muted />}
+                {m.type === 'audio' && <span>🎙️ 语音</span>}
+                <button type="button" onClick={() => setPending(pending.filter((_, j) => j !== i))}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <form className="chat-form chat-form-rich" onSubmit={send}>
           <input
             className="form-input"
             placeholder={blocked ? '你已拉黑对方，无法发送私信' : '输入消息...'}
@@ -107,8 +167,24 @@ export default function Messages() {
             onChange={(e) => setInput(e.target.value)}
             disabled={blocked}
           />
-          <button className="btn btn-primary" type="submit" disabled={!input.trim() || blocked}>发送</button>
+          <button type="button" className="media-btn" onClick={() => setShowSticker(!showSticker)} title="表情包" disabled={blocked}>🧩</button>
+          <label className="media-btn" title="图片 / 视频 / 语音">
+            🖼️
+            <input type="file" accept="image/*,video/*,audio/*" multiple hidden disabled={blocked}
+              onChange={(e) => { uploadFiles(e.target.files); e.target.value = ''; }} />
+          </label>
+          <RecordButton onRecorded={(f) => uploadFiles([f])} disabled={blocked || uploading} />
+          <button className="btn btn-primary" type="submit" disabled={blocked || uploading || (!input.trim() && pending.length === 0)}>
+            {uploading ? '上传中...' : '发送'}
+          </button>
         </form>
+
+        {showSticker && (
+          <StickerPicker
+            onClose={() => setShowSticker(false)}
+            onPick={(url) => { setPending((prev) => [...prev, { type: 'image', url }]); setShowSticker(false); }}
+          />
+        )}
       </div>
 
       {showReport && (

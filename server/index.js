@@ -64,6 +64,12 @@ app.use((req, res, next) => {
 
 // 安全：全局限流，防止暴力攻击
 const limiter = rateLimit({ windowMs: 60 * 1000, max: 120, message: { error: '请求过于频繁，请稍后再试' } });
+// API 与页面入口禁止缓存，确保 APK（WebIntoApp）能拿到最新版本
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  next();
+});
 app.use('/api', limiter);
 // 登录/注册更严格限流
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { error: '尝试次数过多，请15分钟后再试' } });
@@ -93,6 +99,36 @@ const upload = multer({
     else cb(new Error('只允许上传图片文件'));
   },
 });
+
+// 帖子 / 私信 / 评论 / 表情包：支持图片、视频、语音（最多 9 个文件，单个 40MB）
+const mediaUpload = multer({
+  storage,
+  limits: { fileSize: 40 * 1024 * 1024, files: 9 },
+  fileFilter: (req, file, cb) => {
+    if (/^(image|video|audio)\//.test(file.mimetype)) cb(null, true);
+    else cb(new Error('只允许上传图片、视频或音频文件'));
+  },
+});
+
+function mediaKind(mimetype) {
+  if (/^image\//.test(mimetype)) return 'image';
+  if (/^video\//.test(mimetype)) return 'video';
+  if (/^audio\//.test(mimetype)) return 'audio';
+  return 'file';
+}
+
+function parseMedia(value) {
+  if (!value) return [];
+  try {
+    const arr = typeof value === 'string' ? JSON.parse(value) : value;
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((m) => m && m.url && /^(image|video|audio)$/.test(m.type || ''))
+      .map((m) => ({ type: m.type, url: String(m.url) }));
+  } catch {
+    return [];
+  }
+}
 
 // ---------- Auth middleware ----------
 // JWT 中的 id 为对外 uid，这里统一解析出内部 dbId，避免内部自增 ID 外泄
@@ -162,11 +198,18 @@ async function notify(userId, type, fromUser, postId, content) {
 // 匿名帖在 SQL 层直接脱敏：user_id 置 NULL、昵称固定为「匿名同学」；
 // 同时不返回 client_ip / user_agent，避免隐私信息流向公开接口。
 const PUBLIC_POST_FIELDS = `
-  p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
+  p.id, p.category, p.content, p.tags, p.images, p.media, p.status, p.likes, p.views, p.created_at,
   p.is_anonymous, p.is_staff, p.staff_role, p.is_hot,
+  p.quote_post_id, p.activity_signup_required, p.activity_signup_deadline,
+  (SELECT qp.content FROM posts qp WHERE qp.id = p.quote_post_id) AS quote_content,
+  (SELECT qp.nickname FROM posts qp WHERE qp.id = p.quote_post_id) AS quote_nickname,
+  (SELECT qp.category FROM posts qp WHERE qp.id = p.quote_post_id) AS quote_category,
+  (SELECT COUNT(*) FROM activity_signups s WHERE s.post_id = p.id) AS signup_count,
   CASE WHEN p.is_anonymous THEN NULL ELSE u.uid END AS user_id,
   CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname,
-  CASE WHEN p.is_anonymous THEN NULL ELSE u.avatar END AS avatar
+  CASE WHEN p.is_anonymous THEN NULL ELSE u.avatar END AS avatar,
+  CASE WHEN p.is_anonymous THEN NULL ELSE u.custom_tag END AS custom_tag,
+  CASE WHEN p.is_anonymous THEN NULL ELSE u.tag_color END AS tag_color
 `;
 
 // ---------- Helper: 风控 ----------
@@ -175,6 +218,19 @@ async function logAlert(content) {
     await db.prepare(`INSERT INTO super_alerts (content) VALUES (?) RETURNING id`).run(content);
   } catch (e) {
     console.error('[alert] 安全告警写入失败:', e.message);
+  }
+}
+
+// 管理员操作审计：拒绝 / 删除 / 封禁 / 改名 / 标签等全部留痕，用户与超管均可见
+async function logAdminAction(req, action, targetType, targetId, reason, detail) {
+  try {
+    const role = req.adminRole || 'admin';
+    const name = req.adminUser ? (req.adminUser.nickname || req.adminUser.uid) : (role === 'super' ? '超级管理员' : '管理员');
+    await db.prepare(
+      `INSERT INTO admin_logs (admin_role, admin_name, action, target_type, target_id, reason, detail) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`
+    ).run(role, name, action, targetType || '', targetId == null ? '' : String(targetId), reason || '', detail || '');
+  } catch (e) {
+    console.error('[admin-log] 写入失败:', e.message);
   }
 }
 
@@ -268,18 +324,32 @@ app.post('/api/auth/register', async (req, res) => {
   if (username.length < 3 || username.length > 20) return res.status(400).json({ error: '用户名需3-20位' });
   if (password.length < 6) return res.status(400).json({ error: '密码至少6位' });
   if (!agreement) return res.status(400).json({ error: '请先阅读并同意《用户协议》' });
+  // 注册强制要求定位：未授权定位 / 定位失败一律不允许注册
+  const lat = latitude == null || latitude === '' ? null : Number(latitude);
+  const lng = longitude == null || longitude === '' ? null : Number(longitude);
+  if (lat == null || lng == null || !Number.isFinite(lat) || !Number.isFinite(lng) ||
+      Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return res.status(400).json({ error: '注册必须授权并成功获取定位，请在浏览器允许定位权限后重试' });
+  }
   const exists = await db.prepare(`SELECT id FROM users WHERE username = ?`).get(username);
   if (exists) return res.status(400).json({ error: '用户名已被注册' });
   const hash = await bcrypt.hash(password, 10);
   const passwordEnc = encryptPassword(password);
   const uid = genUid();
   // 经纬度仅服务端存储，永不通过任何接口返回
-  const lat = latitude == null ? null : Number(latitude);
-  const lng = longitude == null ? null : Number(longitude);
   const result = await db.prepare(
     `INSERT INTO users (username, password_hash, password_enc, nickname, uid, latitude, longitude, agreed_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ${NOW_TEXT}) RETURNING id`
   ).run(username, hash, passwordEnc, nickname || username, uid, lat, lng);
+  // 新用户自动加入全体成员群聊
+  try {
+    await db.prepare(
+      `INSERT INTO chat_group_members (group_id, user_uid, role)
+       SELECT id, ?, 'member' FROM chat_groups WHERE is_all = TRUE ON CONFLICT DO NOTHING`
+    ).run(uid);
+  } catch (e) {
+    console.error('[register] 加入全体群聊失败:', e.message);
+  }
   const token = jwt.sign({ id: uid, username, nickname: nickname || username, role: 'user' }, JWT_SECRET, { expiresIn: '30d' });
   res.json({ token, user: { uid, username, nickname: nickname || username, role: 'user' } });
 });
@@ -303,7 +373,7 @@ app.get('/api/auth/me', auth, async (req, res) => {
     `SELECT uid, username, nickname, avatar, bio, role, created_at, profile_public,
             real_name, class_name, address, email, wechat, qq, phone,
             show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
-            grade, tag, grade_set_by_admin, show_uid
+            grade, tag, grade_set_by_admin, show_uid, custom_tag, tag_color, coins
      FROM users WHERE id = ?`
   ).get(req.user.dbId);
   // 经纬度(latitude/longitude)永远不返回给任何用户，包括本人
@@ -355,19 +425,12 @@ app.put('/api/auth/profile', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// 注销账号：删除用户及其所有关联数据
+// 注销账号：需提交申请并上传智学网卷子图片，由超级管理员审批后才会执行
 app.delete('/api/auth/account', auth, async (req, res) => {
-  const uid = req.user.uid;
-  const dbId = req.user.dbId;
-  // 清理无外键的关联表
-  await db.prepare(`DELETE FROM notifications WHERE user_id = ?`).run(dbId);
-  await db.prepare(`DELETE FROM follows WHERE follower_id = ? OR following_id = ?`).run(dbId, dbId);
-  await db.prepare(`DELETE FROM friends WHERE requester_uid = ? OR addressee_uid = ?`).run(uid, uid);
-  await db.prepare(`DELETE FROM messages WHERE from_uid = ? OR to_uid = ?`).run(uid, uid);
-  await db.prepare(`DELETE FROM reports WHERE user_id = ?`).run(dbId);
-  // posts/comments/likes/favorites 由外键 ON DELETE SET NULL / CASCADE 处理
-  await db.prepare(`DELETE FROM users WHERE id = ?`).run(dbId);
-  res.json({ ok: true });
+  return res.status(403).json({
+    error: '为保护账号安全，注销需提交申请：请上传一张智学网卷子图片（卷子标题、姓名、智学号、班级号数需清晰），经超级管理员审核同意后才会注销',
+    code: 'DELETION_REQUIRES_APPROVAL',
+  });
 });
 // 用户搜索（用于 @提及 自动补全），仅返回 uid/username/nickname/avatar
 // 必须放在 /api/users/:id 之前，避免 "search" 被当作 :id 捕获
@@ -387,7 +450,7 @@ app.get('/api/users/:id', async (req, res) => {
     `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation, role,
             real_name, class_name, address, email, wechat, qq, phone,
             show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
-            grade, tag, show_uid
+            grade, tag, show_uid, custom_tag, tag_color
      FROM users WHERE uid = ?`
   ).get(req.params.id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
@@ -396,6 +459,7 @@ app.get('/api/users/:id', async (req, res) => {
     username: user.username, nickname: user.nickname, avatar: user.avatar,
     bio: user.bio, created_at: user.created_at, profile_public: !!user.profile_public, postCount,
     grade: user.grade, tag: user.tag, role: user.role,
+    custom_tag: user.custom_tag, tag_color: user.tag_color,
   };
   // 信誉分仅对本人与超级管理员可见
   const viewer = await getCurrentUser(req);
@@ -486,19 +550,23 @@ app.get('/api/posts', async (req, res) => {
   const total = (await db.prepare(totalSql).get(...params.slice(0, -2))).c;
 
   const posts = await db.prepare(sql).all(...params);
-  posts.forEach(p => { p.images = p.images ? JSON.parse(p.images) : []; p.tags = p.tags ? JSON.parse(p.tags) : []; });
+  posts.forEach(p => {
+    p.images = p.images ? JSON.parse(p.images) : [];
+    p.media = parseMedia(p.media);
+    p.tags = p.tags ? JSON.parse(p.tags) : [];
+  });
   res.json({ total, posts });
 });
 
 app.get('/api/posts/hot', async (req, res) => {
   const posts = await db.prepare(
-    `SELECT p.id, p.category, p.content, p.likes, p.views, p.created_at, p.is_anonymous, p.is_staff, p.staff_role, p.is_hot,
+    `SELECT p.id, p.category, p.content, p.media, p.likes, p.views, p.created_at, p.is_anonymous, p.is_staff, p.staff_role, p.is_hot,
             CASE WHEN p.is_anonymous THEN NULL ELSE u.uid END AS user_id,
             CASE WHEN p.is_anonymous THEN '匿名同学' ELSE p.nickname END AS nickname
      FROM posts p LEFT JOIN users u ON u.id = p.user_id
      WHERE p.status = 'approved' ORDER BY p.is_hot DESC, (p.likes + p.views * 0.1) DESC LIMIT 10`
   ).all();
-  posts.forEach(p => { p.images = []; });
+  posts.forEach(p => { p.images = []; p.media = parseMedia(p.media); p.tags = []; });
   res.json(posts);
 });
 
@@ -506,46 +574,89 @@ app.get('/api/posts/:id', async (req, res) => {
   const post = await db.prepare(`SELECT ${PUBLIC_POST_FIELDS} FROM posts p LEFT JOIN users u ON u.id = p.user_id WHERE p.id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
   post.images = post.images ? JSON.parse(post.images) : [];
+  post.media = parseMedia(post.media);
   post.tags = post.tags ? JSON.parse(post.tags) : [];
   await db.prepare(`UPDATE posts SET views = views + 1 WHERE id = ?`).run(req.params.id);
   post.views += 1;
 
+  // 记录登录用户的浏览（超级管理员可查看谁看过、看过几次）
+  const user = await getCurrentUser(req);
+  if (user) {
+    try {
+      await db.prepare(
+        `INSERT INTO post_views (post_id, viewer_uid, view_count, last_viewed_at)
+         VALUES (?, ?, 1, ${NOW_TEXT})
+         ON CONFLICT (post_id, viewer_uid)
+         DO UPDATE SET view_count = post_views.view_count + 1, last_viewed_at = ${NOW_TEXT}`
+      ).run(req.params.id, user.uid);
+    } catch (e) {
+      console.error('[view] 记录浏览失败:', e.message);
+    }
+  }
+
   const comments = await db.prepare(
-    `SELECT c.id, c.post_id, c.parent_id, c.content, c.nickname, c.likes, c.created_at,
+    `SELECT c.id, c.post_id, c.parent_id, c.content, c.media, c.nickname, c.likes, c.created_at,
             CASE WHEN c.user_id IS NULL THEN NULL ELSE u.uid END AS user_id,
             u.nickname as user_nickname, u.avatar
      FROM comments c LEFT JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.id ASC`
   ).all(req.params.id);
+  comments.forEach((c) => { c.media = parseMedia(c.media); });
 
-  const user = await getCurrentUser(req);
   const liked = user ? !!(await db.prepare(`SELECT id FROM likes WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.dbId)) : false;
   const favorited = user ? !!(await db.prepare(`SELECT id FROM favorites WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.dbId)) : false;
+  const signedUp = user ? !!(await db.prepare(`SELECT id FROM activity_signups WHERE post_id = ? AND user_id = ?`).get(req.params.id, user.dbId)) : false;
 
-  res.json({ post, comments, liked, favorited });
+  res.json({ post, comments, liked, favorited, signedUp });
 });
 
-app.post('/api/posts', auth, upload.array('images', 9), async (req, res) => {
-  const { category, content, tags, anonymous } = req.body;
-  if (!category || !content || !content.trim()) return res.status(400).json({ error: '分类和内容不能为空' });
-  if (content.length > 3000) return res.status(400).json({ error: '内容不能超过3000字' });
+app.post('/api/posts', auth, mediaUpload.fields([{ name: 'images', maxCount: 9 }, { name: 'media', maxCount: 9 }]), async (req, res) => {
+  const { category, content, tags, anonymous, quotePostId, activitySignupRequired, activitySignupDeadline } = req.body;
+  if (!category) return res.status(400).json({ error: '请选择板块' });
+  if (!content?.trim() && !(req.files && Object.values(req.files).flat().length) && !(req.body.mediaUrls || req.body.media)) {
+    return res.status(400).json({ error: '内容和媒体不能都为空' });
+  }
+  if (content && content.length > 3000) return res.status(400).json({ error: '内容不能超过3000字' });
+  // 板块必须存在（超级管理员可以删除板块）
+  const cat = await db.prepare(`SELECT name, is_activity FROM categories WHERE name = ?`).get(category);
+  if (!cat) return res.status(400).json({ error: '该板块不存在或已被删除' });
   // 敏感词检测
-  if (containsSensitive(content)) {
+  if (content && containsSensitive(content)) {
     return res.status(400).json({ error: '内容包含违规词汇，请修改后再发布' });
   }
   const isAnonymous = anonymous === true || anonymous === 1 || String(anonymous).toLowerCase() === 'true' || String(anonymous) === '1';
   const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || '';
   const userAgent = req.headers['user-agent'] || '';
-  // 图片处理：上传到云端存储，未配置则存本地
-  let images = [];
+  const tagArr = tags ? (Array.isArray(tags) ? tags : JSON.parse(tags)) : [];
+
+  // 上传媒体（图片 / 视频 / 语音）
+  const mediaList = [];
   try {
-    for (const f of req.files || []) {
-      images.push(await fileStorage.saveFile(f, `posts/${Date.now()}-${f.originalname}`));
+    const fileGroups = req.files && !Array.isArray(req.files) ? Object.values(req.files).flat() : (req.files || []);
+    for (const f of fileGroups) {
+      mediaList.push({
+        type: mediaKind(f.mimetype),
+        url: await fileStorage.saveFile(f, `posts/${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${f.originalname}`),
+      });
     }
   } catch (e) {
-    console.error('图片上传失败:', e.message);
-    return res.status(500).json({ error: '图片上传失败' });
+    console.error('媒体上传失败:', e.message);
+    return res.status(500).json({ error: '媒体上传失败' });
   }
-  const tagArr = tags ? (Array.isArray(tags) ? tags : JSON.parse(tags)) : [];
+  // 允许客户端先通过 /api/upload/media 上传后回传 URL
+  const preMedia = parseMedia(req.body.mediaUrls || req.body.media);
+  for (const m of preMedia) mediaList.push(m);
+  const images = mediaList.filter((m) => m.type === 'image').map((m) => m.url);
+
+  // 引用帖子校验
+  let quoteId = null;
+  if (quotePostId != null && quotePostId !== '' && quotePostId !== '0') {
+    const q = await db.prepare(`SELECT id FROM posts WHERE id = ?`).get(Number(quotePostId));
+    if (!q) return res.status(400).json({ error: '引用的帖子不存在' });
+    quoteId = q.id;
+  }
+  const isActivity = !!cat.is_activity;
+  const signupRequired = isActivity && ['true', '1', 'on'].includes(String(activitySignupRequired).toLowerCase());
+
   // 管理员 / 超级管理员发帖直接过审并标记身份
   const isStaff = req.user.role === 'admin' || req.user.role === 'super';
   const status = isStaff ? 'approved' : 'pending';
@@ -553,16 +664,20 @@ app.post('/api/posts', auth, upload.array('images', 9), async (req, res) => {
   // 发帖昵称固定使用用户设置的昵称
   const postNickname = (req.user.nickname || '').trim();
   const result = await db.prepare(
-    `INSERT INTO posts (user_id, category, content, tags, nickname, images, is_anonymous, client_ip, user_agent, status, is_staff, staff_role)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+    `INSERT INTO posts (user_id, category, content, tags, nickname, images, media, quote_post_id,
+       activity_signup_required, activity_signup_deadline,
+       is_anonymous, client_ip, user_agent, status, is_staff, staff_role)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
   ).run(
-    req.user.dbId, category, content.trim(), JSON.stringify(tagArr), postNickname,
-    JSON.stringify(images), isAnonymous, clientIp, userAgent, status, isStaff, staffRole
+    req.user.dbId, category, (content || '').trim(), JSON.stringify(tagArr), postNickname,
+    JSON.stringify(images), JSON.stringify(mediaList), quoteId,
+    signupRequired, activitySignupDeadline || null,
+    isAnonymous, clientIp, userAgent, status, isStaff, staffRole
   );
 
   // 解析 @用户名 提及并通知被提及用户（仅非匿名帖）
   if (!isAnonymous) {
-    const mentionMatches = content.match(/@([a-zA-Z0-9_\u4e00-\u9fa5]{2,20})/g) || [];
+    const mentionMatches = (content || '').match(/@([a-zA-Z0-9_\u4e00-\u9fa5]{2,20})/g) || [];
     const mentionedUsernames = [...new Set(mentionMatches.map((m) => m.slice(1)))];
     for (const uname of mentionedUsernames) {
       const target = await db.prepare(`SELECT id, uid FROM users WHERE username = ? AND id != ?`).get(uname, req.user.dbId);
@@ -622,21 +737,24 @@ app.post('/api/posts/:id/like', auth, async (req, res) => {
 // 未登录用户不可评论
 app.post('/api/posts/:id/comments', auth, async (req, res) => {
   const { content, parentId } = req.body;
-  if (!content || !content.trim()) return res.status(400).json({ error: '评论内容不能为空' });
-  if (content.length > 500) return res.status(400).json({ error: '评论不能超过500字' });
-  if (containsSensitive(content)) return res.status(400).json({ error: '评论包含违规词汇，请修改后再发布' });
+  const media = parseMedia(req.body.media);
+  if ((!content || !content.trim()) && media.length === 0) return res.status(400).json({ error: '评论内容不能为空' });
+  if (content && content.length > 500) return res.status(400).json({ error: '评论不能超过500字' });
+  if (content && containsSensitive(content)) return res.status(400).json({ error: '评论包含违规词汇，请修改后再发布' });
   const post = await db.prepare(`SELECT id, user_id, nickname FROM posts WHERE id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
   // 昵称固定使用登录用户的当前昵称
   const nick = req.user.nickname;
+  const text = (content || '').trim();
   const result = await db.prepare(
-    `INSERT INTO comments (post_id, user_id, parent_id, content, nickname) VALUES (?, ?, ?, ?, ?) RETURNING id`
-  ).run(req.params.id, req.user.dbId, parentId || null, content.trim(), nick);
+    `INSERT INTO comments (post_id, user_id, parent_id, content, media, nickname) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+  ).run(req.params.id, req.user.dbId, parentId || null, text, JSON.stringify(media), nick);
+  const preview = text ? text.slice(0, 30) : '[图片/视频/语音]';
   if (parentId) {
     const parent = await db.prepare(`SELECT user_id, nickname FROM comments WHERE id = ?`).get(parentId);
-    if (parent) await notify(parent.user_id, 'comment_reply', req.user.uid, post.id, `回复了你的评论: ${content.slice(0, 30)}`);
+    if (parent) await notify(parent.user_id, 'comment_reply', req.user.uid, post.id, `回复了你的评论: ${preview}`);
   } else {
-    await notify(post.user_id, 'comment', req.user.uid, post.id, `评论了你的帖子: ${content.slice(0, 30)}`);
+    await notify(post.user_id, 'comment', req.user.uid, post.id, `评论了你的帖子: ${preview}`);
   }
   res.json({ id: result.lastInsertRowid });
 });
@@ -829,7 +947,10 @@ app.get('/api/messages/conversations', auth, async (req, res) => {
     const peer = m.from_uid === req.user.uid ? m.to_uid : m.from_uid;
     if (blockedSet.has(peer)) continue;
     if (!map.has(peer)) {
-      map.set(peer, { uid: peer, last_content: m.content, last_time: m.created_at, unread: 0 });
+      const preview = m.content || (m.share_type
+        ? (m.share_type === 'post' ? '[分享的帖子]' : m.share_type === 'profile' ? '[分享的主页]' : '[分享]')
+        : (m.media ? '[图片/视频/语音]' : ''));
+      map.set(peer, { uid: peer, last_content: preview, last_time: m.created_at, unread: 0 });
       peers.push(peer);
     }
     if (m.to_uid === req.user.uid && m.from_uid === peer && !m.read) map.get(peer).unread += 1;
@@ -855,10 +976,11 @@ app.get('/api/messages/:uid', auth, async (req, res) => {
   if (!peer) return res.status(404).json({ error: '用户不存在' });
   await db.prepare(`UPDATE messages SET read = TRUE WHERE from_uid = ? AND to_uid = ? AND read = FALSE`).run(peerUid, req.user.uid);
   const list = await db.prepare(
-    `SELECT id, from_uid, to_uid, content, read, created_at FROM messages
+    `SELECT id, from_uid, to_uid, content, media, share_type, share_id, read, created_at FROM messages
      WHERE (from_uid = ? AND to_uid = ?) OR (from_uid = ? AND to_uid = ?)
      ORDER BY id ASC`
   ).all(req.user.uid, peerUid, peerUid, req.user.uid);
+  list.forEach((m) => { m.media = parseMedia(m.media); });
   res.json(list);
 });
 
@@ -870,9 +992,13 @@ app.post('/api/messages/read/:uid', auth, async (req, res) => {
 });
 
 app.post('/api/messages', auth, async (req, res) => {
-  const { to, content } = req.body;
+  const { to, content, shareType, shareId } = req.body;
+  const media = parseMedia(req.body.media);
+  const share = shareType && shareId ? { type: String(shareType), id: String(shareId) } : null;
   if (!to) return res.status(400).json({ error: '请选择接收者' });
-  if (!content || !String(content).trim()) return res.status(400).json({ error: '消息内容不能为空' });
+  if ((!content || !String(content).trim()) && media.length === 0 && !share) {
+    return res.status(400).json({ error: '消息内容不能为空' });
+  }
   if (to === req.user.uid) return res.status(400).json({ error: '不能给自己发私信' });
   const peer = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(to);
   if (!peer) return res.status(404).json({ error: '用户不存在' });
@@ -881,11 +1007,12 @@ app.post('/api/messages', auth, async (req, res) => {
     `SELECT id FROM blocks WHERE (blocker_uid = ? AND blocked_uid = ?) OR (blocker_uid = ? AND blocked_uid = ?)`
   ).get(req.user.uid, to, to, req.user.uid);
   if (blocked) return res.status(403).json({ error: '由于拉黑关系，无法发送私信' });
-  const text = String(content).trim();
+  const text = String(content || '').trim();
   const result = await db.prepare(
-    `INSERT INTO messages (from_uid, to_uid, content) VALUES (?, ?, ?) RETURNING id`
-  ).run(req.user.uid, to, text);
-  await notify(peer.id, 'message', req.user.uid, null, text.slice(0, 60));
+    `INSERT INTO messages (from_uid, to_uid, content, media, share_type, share_id) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+  ).run(req.user.uid, to, text, JSON.stringify(media), share ? share.type : null, share ? share.id : null);
+  const notifyText = text || (share ? (share.type === 'post' ? '分享了一个帖子' : '分享了主页') : '[图片/视频/语音]');
+  await notify(peer.id, 'message', req.user.uid, share && share.type === 'post' ? Number(share.id) : null, notifyText.slice(0, 60));
   res.json({ id: result.lastInsertRowid });
 });
 
@@ -895,27 +1022,31 @@ app.get('/api/admin/whoami', adminAuth, (req, res) => {
 });
 
 app.post('/api/admin/notify', superAuth, async (req, res) => {
-  const { uids, all, content } = req.body;
+  const { uids, all, content, image, badgeText, badgeColor } = req.body;
   if (!content || !String(content).trim()) return res.status(400).json({ error: '通知内容不能为空' });
   const text = String(content).trim();
+  const img = image ? String(image) : null;
+  const badge = badgeText ? String(badgeText).slice(0, 20) : null;
+  const badgeClr = badgeColor ? String(badgeColor).slice(0, 30) : null;
   let sent = 0;
   if (all) {
     const result = await db.prepare(
-      `INSERT INTO notifications (user_id, type, from_user, content)
-       SELECT id, 'system', 'system', ? FROM users RETURNING id`
-    ).run(text);
+      `INSERT INTO notifications (user_id, type, from_user, content, image, badge_text, badge_color)
+       SELECT id, 'system', 'system', ?, ?, ?, ? FROM users RETURNING id`
+    ).run(text, img, badge, badgeClr);
     sent = result.changes;
   } else {
     if (!Array.isArray(uids) || uids.length === 0) return res.status(400).json({ error: '请提供接收用户 uid' });
     for (const uid of uids) {
       if (typeof uid !== 'string' || !uid.trim()) continue;
       const result = await db.prepare(
-        `INSERT INTO notifications (user_id, type, from_user, content)
-         SELECT id, 'system', 'system', ? FROM users WHERE uid = ? RETURNING id`
-      ).run(text, uid.trim());
+        `INSERT INTO notifications (user_id, type, from_user, content, image, badge_text, badge_color)
+         SELECT id, 'system', 'system', ?, ?, ?, ? FROM users WHERE uid = ? RETURNING id`
+      ).run(text, img, badge, badgeClr, uid.trim());
       sent += result.changes;
     }
   }
+  await logAdminAction(req, 'send_notification', 'notification', all ? 'all' : (uids || []).join(','), text.slice(0, 100), badge || '');
   res.json({ sent });
 });
 
@@ -927,13 +1058,18 @@ app.get('/api/admin/posts', adminAuth, async (req, res) => {
   if (status && status !== 'all') { where = 'WHERE p.status = ?'; params.push(status); }
   const total = (await db.prepare(`SELECT COUNT(*) as c FROM posts p ${where}`).get(...params)).c;
   const posts = await db.prepare(
-    `SELECT p.id, p.category, p.content, p.tags, p.images, p.status, p.likes, p.views, p.created_at,
+    `SELECT p.id, p.category, p.content, p.tags, p.images, p.media, p.status, p.review_note,
+            p.likes, p.views, p.created_at, p.quote_post_id, p.activity_signup_required,
             p.is_anonymous, p.is_hot, p.nickname, p.client_ip, p.user_agent, p.is_staff, p.staff_role,
             CASE WHEN p.user_id IS NULL THEN NULL ELSE u.uid END AS user_id
      FROM posts p LEFT JOIN users u ON u.id = p.user_id
      ${where} ORDER BY p.id DESC LIMIT ? OFFSET ?`
   ).all(...params, Number(pageSize), offset);
-  posts.forEach(p => { p.images = p.images ? JSON.parse(p.images) : []; p.tags = p.tags ? JSON.parse(p.tags) : []; });
+  posts.forEach(p => {
+    p.images = p.images ? JSON.parse(p.images) : [];
+    p.media = parseMedia(p.media);
+    p.tags = p.tags ? JSON.parse(p.tags) : [];
+  });
   res.json({ total, posts });
 });
 
@@ -941,6 +1077,7 @@ app.get('/api/admin/posts/:id', adminAuth, async (req, res) => {
   const post = await db.prepare(`SELECT * FROM posts WHERE id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
   post.images = post.images ? JSON.parse(post.images) : [];
+  post.media = parseMedia(post.media);
   post.tags = post.tags ? JSON.parse(post.tags) : [];
 
   const authorId = post.user_id;
@@ -953,11 +1090,12 @@ app.get('/api/admin/posts/:id', adminAuth, async (req, res) => {
   post.user_id = author ? author.uid : null;
   const commentCount = (await db.prepare(`SELECT COUNT(*) as c FROM comments WHERE post_id = ?`).get(req.params.id)).c;
   const comments = await db.prepare(
-    `SELECT c.id, c.parent_id, c.content, c.nickname, c.created_at, c.likes,
+    `SELECT c.id, c.parent_id, c.content, c.media, c.nickname, c.created_at, c.likes,
             CASE WHEN c.user_id IS NULL THEN NULL ELSE u.uid END AS user_id
      FROM comments c LEFT JOIN users u ON u.id = c.user_id
      WHERE c.post_id = ? ORDER BY c.id ASC`
   ).all(req.params.id);
+  comments.forEach((c) => { c.media = parseMedia(c.media); });
 
   res.json({
     post,
@@ -971,13 +1109,20 @@ app.get('/api/admin/posts/:id', adminAuth, async (req, res) => {
 });
 
 app.put('/api/admin/posts/:id', adminAuth, async (req, res) => {
-  const { status, is_hot } = req.body || {};
+  const { status, is_hot, note, reason } = req.body || {};
+  const noteText = typeof note === 'string' ? note : (typeof reason === 'string' ? reason : undefined);
+  const target = await db.prepare(`SELECT id, user_id, content, review_note FROM posts WHERE id = ?`).get(req.params.id);
+  if (!target) return res.status(404).json({ error: '帖子不存在' });
   const sets = [];
   const params = [];
   if (status !== undefined) {
     if (!['approved', 'rejected', 'pending'].includes(status)) return res.status(400).json({ error: '无效状态' });
     sets.push('status = ?');
     params.push(status);
+  }
+  if (noteText !== undefined) {
+    sets.push('review_note = ?');
+    params.push(noteText.slice(0, 500));
   }
   if (is_hot !== undefined) {
     // 仅已通过的帖子可设为热门帖
@@ -992,12 +1137,32 @@ app.put('/api/admin/posts/:id', adminAuth, async (req, res) => {
   if (sets.length === 0) return res.json({ ok: true });
   params.push(req.params.id);
   await db.prepare(`UPDATE posts SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+
+  // 审核结果与理由通知作者，用户可在通知中看到完整处理详情
+  if (status !== undefined && target.user_id) {
+    const reasonText = noteText !== undefined ? noteText : (target.review_note || '');
+    if (status === 'rejected') {
+      await notify(target.user_id, 'system', 'system', target.id,
+        `你的帖子未通过审核${reasonText ? `，理由：${reasonText}` : ''}`);
+    } else if (status === 'approved') {
+      await notify(target.user_id, 'system', 'system', target.id, '你的帖子已通过审核，现已公开显示');
+    }
+  }
+  await logAdminAction(
+    req,
+    status === 'rejected' ? 'reject_post' : status === 'approved' ? 'approve_post' : 'update_post',
+    'post',
+    target.id,
+    noteText !== undefined ? noteText : '',
+    (target.content || '').slice(0, 60)
+  );
   res.json({ ok: true });
 });
 
 app.delete('/api/admin/posts/:id', superAuth, async (req, res) => {
   if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ error: '帖子不存在' });
-  const post = await db.prepare(`SELECT id, user_id, category, content, images FROM posts WHERE id = ?`).get(req.params.id);
+  const reason = String((req.body && req.body.reason) || req.query.reason || '').trim();
+  const post = await db.prepare(`SELECT id, user_id, category, content, images, media FROM posts WHERE id = ?`).get(req.params.id);
   if (!post) return res.status(404).json({ error: '帖子不存在' });
   let authorName = '已注销用户';
   if (post.user_id) {
@@ -1009,6 +1174,15 @@ app.delete('/api/admin/posts/:id', superAuth, async (req, res) => {
       try { await fileStorage.deleteByUrl(img, uploadsDir); } catch (e) { console.error('[admin] 图片清理失败:', e.message); }
     }
   }
+  for (const m of parseMedia(post.media)) {
+    try { await fileStorage.deleteByUrl(m.url, uploadsDir); } catch (e) { console.error('[admin] 媒体清理失败:', e.message); }
+  }
+  // 删除后向作者发送带处理理由的系统通知（post_id 置空，避免随帖子通知清理一起删除）
+  const notifyAuthor = async () => {
+    if (!post.user_id) return;
+    await notify(post.user_id, 'system', 'system', null,
+      `你的帖子已被删除，理由：${reason || '违反社区规范'}（原帖内容：${(post.content || '') .slice(0, 40)}）`);
+  };
   // 超级管理员删帖 → 作者信誉 -10，并记录安全告警
   if (post.user_id) {
     const penalty = await penalizeAndMaybeBan(post.user_id, 10);
@@ -1019,6 +1193,8 @@ app.delete('/api/admin/posts/:id', superAuth, async (req, res) => {
       await tx.prepare(`DELETE FROM notifications WHERE post_id = ?`).run(req.params.id);
       await tx.prepare(`DELETE FROM posts WHERE id = ?`).run(req.params.id);
     });
+    await notifyAuthor();
+    await logAdminAction(req, 'delete_post', 'post', post.id, reason, (post.content || '').slice(0, 60));
     return res.json({ ok: true, message: '帖子及关联数据已删除', reputation: penalty ? penalty.reputation : null });
   }
   await db.transaction(async (tx) => {
@@ -1026,6 +1202,7 @@ app.delete('/api/admin/posts/:id', superAuth, async (req, res) => {
     await tx.prepare(`DELETE FROM notifications WHERE post_id = ?`).run(req.params.id);
     await tx.prepare(`DELETE FROM posts WHERE id = ?`).run(req.params.id);
   });
+  await logAdminAction(req, 'delete_post', 'post', post.id, reason, (post.content || '').slice(0, 60));
   res.json({ ok: true, message: '帖子及关联数据已删除' });
 });
 
@@ -1041,19 +1218,32 @@ app.get('/api/admin/stats', superAuth, async (req, res) => {
 });
 
 app.get('/api/admin/reports', adminAuth, async (req, res) => {
+  const status = String(req.query.status || 'pending');
+  const where = status === 'all' ? '' : 'WHERE r.status = ?';
+  const params = status === 'all' ? [] : [status];
   const reports = await db.prepare(`
-    SELECT r.*, p.content as post_content, p.category as post_category
-    FROM reports r LEFT JOIN posts p ON r.post_id = p.id
-    ORDER BY r.id DESC LIMIT 100
-  `).all();
+    SELECT r.*, p.content as post_content, p.category as post_category, c.content as comment_content,
+           (SELECT nickname FROM users WHERE id = r.user_id) AS reporter_nickname,
+           (SELECT username FROM users WHERE id = r.user_id) AS reporter_username
+    FROM reports r
+    LEFT JOIN posts p ON r.post_id = p.id
+    LEFT JOIN comments c ON r.comment_id = c.id
+    ${where}
+    ORDER BY r.id DESC LIMIT 200
+  `).all(...params);
   res.json(reports);
 });
 
 app.put('/api/admin/reports/:id', adminAuth, async (req, res) => {
-  const { status } = req.body;
-  const report = await db.prepare(`SELECT id, post_id, comment_id, status FROM reports WHERE id = ?`).get(req.params.id);
+  const { status, note } = req.body;
+  const allowed = ['pending', 'resolved', 'valid', 'invalid', 'ignored'];
+  if (!allowed.includes(status)) return res.status(400).json({ error: '无效的举报处理状态' });
+  const noteText = note ? String(note).slice(0, 500) : '';
+  const report = await db.prepare(`SELECT id, post_id, comment_id, user_id, status FROM reports WHERE id = ?`).get(req.params.id);
   if (!report) return res.status(404).json({ error: '举报不存在' });
-  await db.prepare(`UPDATE reports SET status = ? WHERE id = ?`).run(status, req.params.id);
+  const adminName = req.adminUser ? (req.adminUser.nickname || req.adminUser.uid) : '超管口令';
+  await db.prepare(`UPDATE reports SET status = ?, handle_note = ?, handled_by = ?, handled_at = ${NOW_TEXT} WHERE id = ?`)
+    .run(status, noteText, adminName, req.params.id);
 
   // 举报判定有效（valid / resolved）→ 作者信誉 -10（同一条举报只扣一次）
   let reputation = null;
@@ -1071,6 +1261,13 @@ app.put('/api/admin/reports/:id', adminAuth, async (req, res) => {
       reputation = r ? r.reputation : null;
     }
   }
+
+  // 举报人可看到处理结果与理由
+  const statusLabel = { pending: '待处理', resolved: '已处理', valid: '举报有效', invalid: '举报无效', ignored: '已忽略' }[status] || status;
+  if (report.user_id) {
+    await notify(report.user_id, 'system', 'system', report.post_id, `你的举报已处理：${statusLabel}${noteText ? `，理由：${noteText}` : ''}`);
+  }
+  await logAdminAction(req, `handle_report_${status}`, 'report', report.id, noteText, statusLabel);
   res.json({ ok: true, reputation });
 });
 
@@ -1085,7 +1282,7 @@ app.get('/api/admin/users', superAuth, async (req, res) => {
   } catch (e) { console.error('[tag-refresh] 失败:', e.message); }
   // 超级管理员可查看用户全部个人信息（含账号、密码哈希等敏感字段）
   const select = `uid, username, password_hash, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
-       grade, tag, grade_set_by_admin, latitude, longitude,
+       grade, tag, grade_set_by_admin, custom_tag, tag_color, coins, latitude, longitude,
        real_name, class_name, address, email, wechat, qq, phone, bio`;
   try {
     const users = await db.prepare(`SELECT ${select} FROM users ORDER BY id DESC`).all();
@@ -1102,7 +1299,7 @@ app.get('/api/admin/users/:uid/detail', superAuth, async (req, res) => {
     const u = await db.prepare(
       `SELECT id, uid, username, password_hash, password_enc, nickname, avatar, bio, role, reputation,
               banned, banned_reason, banned_at, created_at, agreed_at, profile_public, show_uid,
-              grade, tag, grade_set_by_admin, latitude, longitude,
+              grade, tag, grade_set_by_admin, custom_tag, tag_color, coins, latitude, longitude,
               real_name, class_name, address, email, wechat, qq, phone,
               show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone
        FROM users WHERE uid = ?`
@@ -1111,11 +1308,12 @@ app.get('/api/admin/users/:uid/detail', superAuth, async (req, res) => {
     // 明文密码：仅注册时保存过加密明文的账号可还原（bcrypt 哈希本身不可逆）
     const password_plain = decryptPassword(u.password_enc);
     const posts = await db.prepare(
-      `SELECT id, category, content, tags, images, status, is_anonymous, likes, views, created_at
+      `SELECT id, category, content, tags, images, media, status, review_note, is_anonymous, likes, views, created_at
        FROM posts WHERE user_id = ? ORDER BY id DESC LIMIT 200`
     ).all(u.id);
     posts.forEach((p) => {
       try { p.images = p.images ? JSON.parse(p.images) : []; } catch { p.images = []; }
+      try { p.media = parseMedia(p.media); } catch { p.media = []; }
       try { p.tags = p.tags ? JSON.parse(p.tags) : []; } catch { p.tags = []; }
     });
     const comments = await db.prepare(
@@ -1379,6 +1577,16 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
+// ---------- 扩展功能路由（板块 / 群聊 / 红包 / 金币 / 表情包 / 注销审批 / 审计等） ----------
+try {
+  require('./features').register({
+    app, db, auth, adminAuth, superAuth, mediaUpload, upload,
+    fileStorage, uploadsDir, notify, NOW_TEXT, logAdminAction, getCurrentUser, parseMedia, mediaKind,
+  });
+} catch (e) {
+  console.error('[features] 路由加载失败:', e.message, e.stack);
+}
+
 // ---------- 全局错误处理（必须在所有路由之后）----------
 // Express 5 会自动捕获 async 路由抛出的错误并交给此中间件，
 // 避免未处理异常导致 Workers 返回 Cloudflare 默认错误页。
@@ -1392,9 +1600,18 @@ app.use((err, req, res, next) => {
 // ---------- Serve frontend ----------
 const clientDist = path.join(__dirname, '..', 'client', 'dist');
 if (fs.existsSync(clientDist)) {
-  app.use(express.static(clientDist));
+  app.use(express.static(clientDist, {
+    setHeaders: (res, filePath) => {
+      // HTML 与版本文件不缓存，保证 WebIntoApp 打包的 APK 能及时拿到更新
+      if (filePath.endsWith('.html') || filePath.endsWith('version.json')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+      }
+    },
+  }));
   app.use((req, res, next) => {
     if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) return next();
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.sendFile(path.join(clientDist, 'index.html'));
   });
 }

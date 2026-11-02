@@ -54,6 +54,7 @@ export default function Header() {
           {user ? (
             <>
               <NavLink to="/apply">申请</NavLink>
+              <NavLink to="/messages">私信</NavLink>
               <NavLink to="/notifications" className="notif-badge" data-count={unread > 0 ? unread : ''}>通知</NavLink>
               <NavLink to="/favorites">收藏</NavLink>
               {(user.role === 'admin' || user.role === 'super') && <NavLink to="/admin">管理</NavLink>}
