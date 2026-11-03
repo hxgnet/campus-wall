@@ -16,6 +16,8 @@ import Messages from './pages/Messages.jsx';
 import MessagesHub from './pages/MessagesHub.jsx';
 import GroupChat from './pages/GroupChat.jsx';
 import Apply from './pages/Apply.jsx';
+import Activities from './pages/Activities.jsx';
+import BottomNav from './components/BottomNav.jsx';
 
 export default function App() {
   // 版本检测：WebIntoApp 打包的 APK 打开后若服务端已更新，自动刷新
@@ -69,6 +71,7 @@ export default function App() {
           <Route path="/messages/:uid" element={<Messages />} />
           <Route path="/groups/:id" element={<GroupChat />} />
           <Route path="/favorites" element={<Favorites />} />
+          <Route path="/activities" element={<Activities />} />
           <Route path="/apply" element={<Apply />} />
           <Route path="/admin" element={<Admin />} />
         </Routes>
@@ -89,6 +92,7 @@ export default function App() {
             </div>
           </div>
         </footer>
+        <BottomNav />
       </AuthProvider>
     </ThemeProvider>
   );
