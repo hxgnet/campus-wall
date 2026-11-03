@@ -3,7 +3,6 @@ import { useAuth } from '../AuthContext.jsx';
 import { useTheme } from '../ThemeContext.jsx';
 import { api } from '../api.js';
 import { useEffect, useRef, useState } from 'react';
-import BrandMark from './BrandMark.jsx';
 
 export default function Header() {
   const { user, logout } = useAuth();
@@ -40,11 +39,8 @@ export default function Header() {
     <header className="header" ref={headerRef}>
       <div className="container header-inner">
         <NavLink to="/" className="logo">
-          <BrandMark />
-          <span className="logo-text">
-            <span className="logo-title">鹏山校园墙</span>
-            <span className="logo-sub">石狮市鹏山实验学校</span>
-          </span>
+          <span className="logo-icon">🏫</span>
+          <span>校园墙</span>
         </NavLink>
         <nav className="nav-links">
           <div className="nav-inner">
