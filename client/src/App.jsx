@@ -17,6 +17,7 @@ import MessagesHub from './pages/MessagesHub.jsx';
 import GroupChat from './pages/GroupChat.jsx';
 import Apply from './pages/Apply.jsx';
 import Activities from './pages/Activities.jsx';
+import About from './pages/About.jsx';
 import BottomNav from './components/BottomNav.jsx';
 
 export default function App() {
@@ -72,26 +73,10 @@ export default function App() {
           <Route path="/groups/:id" element={<GroupChat />} />
           <Route path="/favorites" element={<Favorites />} />
           <Route path="/activities" element={<Activities />} />
+          <Route path="/about" element={<About />} />
           <Route path="/apply" element={<Apply />} />
           <Route path="/admin" element={<Admin />} />
         </Routes>
-        <footer className="site-footer">
-          <div className="footer-brand">鹏山校园墙 · PENGSHAN CAMPUS WALL</div>
-          <div className="footer-line" />
-          <div className="footer-slogan">以青春之我，建青春之鹏山</div>
-          <div className="footer-meta">石狮市鹏山实验学校 · 灵秀片区九年一贯制实验学校</div>
-          <div className="footer-copy">弘扬大鹏精神：志趣高远 · 精神豪迈 · 追求自由 · 超越自我</div>
-          <div className="footer-contact">
-            <div className="footer-contact-title">问题反馈 · 联系我们</div>
-            <div className="footer-contact-grid">
-              <a href="https://www.webintoapp.com/store/1745442" target="_blank" rel="noopener noreferrer">📲 下载 / 更新 App</a>
-              <a href="mailto:hx_gnet@qq.com">✉️ 反馈邮箱 hx_gnet@qq.com</a>
-              <span>📰 公众号「鹏山实验学校」：PSXX202109</span>
-              <span>🛠️ 公众号「虎孝服务」：hx_Gnet</span>
-              <a href="https://work.weixin.qq.com/ca/cawcde6393385f3cec" target="_blank" rel="noopener noreferrer">💬 在线微信客服</a>
-            </div>
-          </div>
-        </footer>
         <BottomNav />
       </AuthProvider>
     </ThemeProvider>

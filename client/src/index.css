@@ -1740,3 +1740,61 @@ body.dark .bottom-nav { background: rgba(22, 34, 43, 0.96); }
   background: var(--danger);
   border-radius: 9px;
 }
+
+/* ---------- 校园介绍页 ---------- */
+.about-card { padding: 24px 20px 20px; }
+.about-section { text-align: left; margin-top: 22px; }
+.about-section h3 { color: var(--primary); margin-bottom: 8px; font-size: 15px; }
+.about-section p { color: var(--text); font-size: 14px; line-height: 1.8; }
+.about-download {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary) 0%, #177a86 100%);
+  border-radius: 14px;
+  box-shadow: 0 6px 18px rgba(14, 90, 107, 0.28);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.about-download:hover { color: #fff; transform: translateY(-1px); box-shadow: 0 8px 22px rgba(14, 90, 107, 0.38); }
+.about-download-icon { font-size: 26px; line-height: 1; }
+.about-download-text { display: flex; flex: 1; flex-direction: column; gap: 2px; }
+.about-download-text strong { font-size: 16px; font-weight: 700; }
+.about-download-text small { font-size: 12px; opacity: 0.85; }
+.about-download-arrow { font-size: 22px; opacity: 0.85; }
+.about-download-tip {
+  margin: -6px 0 16px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--primary);
+  background: var(--primary-light);
+  border: 1px dashed var(--primary);
+  border-radius: 10px;
+}
+.about-contact-card {
+  margin-bottom: 16px;
+  padding: 14px 16px 4px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+.about-contact-title { margin-bottom: 6px; color: var(--primary); font-size: 15px; font-weight: 700; }
+.about-contact-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 2px;
+  color: var(--text);
+  border-top: 1px dashed var(--border);
+}
+.about-contact-row:hover { color: var(--primary); }
+.about-contact-icon { flex-shrink: 0; font-size: 22px; line-height: 1; }
+.about-contact-main { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.about-contact-main strong { font-size: 14px; font-weight: 600; }
+.about-contact-main small { font-size: 12px; color: var(--text-light); }
+.about-contact-arrow { flex-shrink: 0; font-size: 20px; color: var(--text-light); }

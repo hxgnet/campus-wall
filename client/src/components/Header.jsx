@@ -48,22 +48,19 @@ export default function Header() {
         </NavLink>
         <nav className="nav-links">
           <div className="nav-inner">
-          <NavLink to="/">首页</NavLink>
-          <NavLink to="/create">发帖</NavLink>
           <a href="https://www.webintoapp.com/store/1745442" target="_blank" rel="noopener noreferrer">下载 App</a>
           {user ? (
             <>
               <NavLink to="/apply">申请</NavLink>
-              <NavLink to="/messages">私信</NavLink>
               <NavLink to="/notifications" className="notif-badge" data-count={unread > 0 ? unread : ''}>通知</NavLink>
               <NavLink to="/favorites">收藏</NavLink>
               {(user.role === 'admin' || user.role === 'super') && <NavLink to="/admin">管理</NavLink>}
-              <NavLink to={`/profile/${user.uid}`}>{user.nickname}</NavLink>
               <button className="back-btn" style={{ color: '#fff', margin: 0 }} onClick={() => { logout(); navigate('/'); }}>退出</button>
             </>
           ) : (
             <NavLink to="/login">登录</NavLink>
           )}
+          <NavLink to="/about">校园介绍</NavLink>
           <button className="back-btn" style={{ color: '#fff', margin: 0, fontSize: 18 }} onClick={toggle}>{dark ? '☀️' : '🌙'}</button>
           </div>
         </nav>
