@@ -5,21 +5,21 @@
 }
 
 :root {
-  --primary: #6366f1;
-  --primary-dark: #4f46e5;
-  --primary-light: #eef2ff;
+  --primary: #0e5a6b;
+  --primary-dark: #0a4551;
+  --primary-light: #e3f1f3;
   --accent: #e2a33e;
   --accent-light: #fbf1e0;
-  --bg: #f5f6fa;
+  --bg: #f4f1e9;
   --card: #ffffff;
-  --text: #1f2937;
-  --text-light: #6b7280;
-  --border: #e5e7eb;
+  --text: #16262e;
+  --text-light: #64767f;
+  --border: #e6e0d4;
   --success: #10b981;
   --warning: #f59e0b;
-  --danger: #ef4444;
-  --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
-  --shadow-lg: 0 10px 25px rgba(0,0,0,0.08);
+  --danger: #d9534f;
+  --shadow: 0 1px 3px rgba(22,38,46,0.07), 0 1px 2px rgba(22,38,46,0.04);
+  --shadow-lg: 0 10px 25px rgba(10,69,81,0.12);
 }
 
 body {
@@ -49,13 +49,22 @@ img { max-width: 100%; display: block; }
 
 /* Header */
 .header {
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  background: linear-gradient(120deg, #0a4551 0%, #0e5a6b 55%, #177a86 100%);
   color: #fff;
-  padding: 10px 0;
+  padding: 8px 0;
   position: sticky;
   top: 0;
   z-index: 100;
-  box-shadow: var(--shadow-lg);
+  box-shadow: 0 2px 12px rgba(10,69,81,0.22);
+}
+.header::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: linear-gradient(90deg, rgba(226,163,62,0) 0%, #e2a33e 25%, #f2d089 50%, #e2a33e 75%, rgba(226,163,62,0) 100%);
 }
 .header-inner {
   display: flex;
@@ -69,10 +78,27 @@ img { max-width: 100%; display: block; }
   font-weight: 700;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
 }
-.logo-icon {
-  font-size: 24px;
+.logo-mark {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  display: block;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.18));
+}
+.logo-mark svg { width: 100%; height: 100%; display: block; }
+.logo-text { display: flex; flex-direction: column; line-height: 1.15; }
+.logo-title {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.logo-sub {
+  font-size: 10px;
+  font-weight: 400;
+  opacity: 0.75;
+  letter-spacing: 0.5px;
 }
 .nav-links {
   display: block;
@@ -546,6 +572,152 @@ body.dark .cat-tab { background: var(--card); border-color: var(--border); color
 body.dark .btn-secondary { background: #334155; color: var(--text); border-color: var(--border); }
 body.dark .upload-btn { background: #0f172a; border-color: var(--border); }
 body.dark input::placeholder, body.dark textarea::placeholder { color: #64748b; }
+
+/* ============ 鹏山校园墙 · 品牌视觉 ============ */
+.hero-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: 18px;
+  padding: 24px;
+  margin: 18px 0 16px;
+  color: #fff;
+  background: linear-gradient(135deg, #0a4551 0%, #0e5a6b 45%, #1a7f88 100%);
+  box-shadow: var(--shadow-lg);
+}
+.hero-card::before {
+  content: '';
+  position: absolute;
+  right: -70px;
+  top: -80px;
+  width: 230px;
+  height: 230px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(226,163,62,0.5) 0%, rgba(226,163,62,0) 70%);
+}
+.hero-card::after {
+  content: '鹏';
+  position: absolute;
+  right: 14px;
+  bottom: -26px;
+  font-family: 'Songti SC', 'STSong', 'SimSun', serif;
+  font-size: 118px;
+  font-weight: 700;
+  line-height: 1;
+  color: rgba(255,255,255,0.07);
+  pointer-events: none;
+}
+.hero-kicker {
+  position: relative;
+  z-index: 1;
+  font-size: 10px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  opacity: 0.78;
+  margin-bottom: 8px;
+}
+.hero-title {
+  position: relative;
+  z-index: 1;
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  margin-bottom: 8px;
+}
+.hero-slogan {
+  position: relative;
+  z-index: 1;
+  font-size: 13px;
+  opacity: 0.9;
+  margin-bottom: 14px;
+}
+.hero-chips {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.hero-chip {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  letter-spacing: 0.5px;
+  background: rgba(255,255,255,0.14);
+  border: 1px solid rgba(255,255,255,0.24);
+}
+.hero-logo {
+  position: relative;
+  z-index: 1;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 12px;
+}
+
+.site-footer {
+  margin-top: auto;
+  padding: 26px 16px 24px;
+  background: var(--card);
+  border-top: 1px solid var(--border);
+  text-align: center;
+  color: var(--text-light);
+}
+.footer-brand {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--primary);
+}
+.footer-line {
+  width: 46px;
+  height: 3px;
+  border-radius: 2px;
+  margin: 10px auto 12px;
+  background: linear-gradient(90deg, #e2a33e, #f2d089);
+}
+.footer-slogan {
+  font-size: 13px;
+  color: var(--text);
+  letter-spacing: 1px;
+}
+.footer-meta {
+  font-size: 11px;
+  margin-top: 6px;
+  letter-spacing: 0.5px;
+}
+.footer-copy {
+  font-size: 11px;
+  margin-top: 10px;
+  opacity: 0.72;
+}
+body.dark .site-footer { background: #16222b; }
+
+.footer-contact {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--border);
+}
+.footer-contact-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+.footer-contact-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  justify-content: center;
+  font-size: 12px;
+}
+.footer-contact-grid a,
+.footer-contact-grid span {
+  color: var(--text-light);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.footer-contact-grid a:hover { color: var(--primary); }
 
 /* 用户主页标签 */
 .profile-tags {
