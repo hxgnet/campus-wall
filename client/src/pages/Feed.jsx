@@ -35,6 +35,7 @@ export default function Feed() {
   }, []);
 
   // 回到前台时自动刷新信息流，防止 App 在后台挂久了显示旧帖子
+  // 依赖 category/sort：否则切到某个板块后再回到前台，会刷新回「全部」
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === 'visible') loadPosts(true);
@@ -42,7 +43,7 @@ export default function Feed() {
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
     /* eslint-disable-next-line */
-  }, []);
+  }, [category, sort]);
 
   const onLikeChange = (id, likes) => setPosts((prev) => prev.map((p) => p.id === id ? { ...p, likes } : p));
 

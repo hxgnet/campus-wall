@@ -1,24 +1,35 @@
 # Cloudflare Pages 缓存策略
-# 入口 HTML 每次都校验，确保 WebView / 浏览器拿到最新版本
+# 入口 HTML 每次校验，确保 WebView / 浏览器拿到最新版本
+# 注意：不要再写 /* 全局规则，Pages 会把它和下面的规则合并成互相冲突的
+# Cache-Control（例如 no-store + immutable），反而破坏资源缓存。
+/
+  Cache-Control: no-cache, no-store, must-revalidate
+  Pragma: no-cache
+  Expires: 0
+
 /index.html
   Cache-Control: no-cache, no-store, must-revalidate
   Pragma: no-cache
   Expires: 0
 
-/*
+/*.html
   Cache-Control: no-cache, no-store, must-revalidate
   Pragma: no-cache
   Expires: 0
 
-# 带 hash 的静态资源（JS/CSS/图片）长期缓存，文件名 hash 变了自然失效
+# 带 hash 的静态资源（JS/CSS）长期缓存，文件名 hash 变了自然失效
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
 
-# API 绝对不缓存
+# API 绝对不缓存（_worker.js 处理动态请求时也会再设一次）
 /api/*
   Cache-Control: no-store, no-cache, must-revalidate, max-age=0
   Pragma: no-cache
   Expires: 0
 
 /uploads/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# 媒体代理（_worker.js 也会设置）
+/media/*
   Cache-Control: public, max-age=31536000, immutable
