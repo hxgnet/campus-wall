@@ -1900,6 +1900,7 @@ body.dark .bottom-nav { background: rgba(22, 34, 43, 0.96); }
 /* ---------- 主页二维码 ---------- */
 .qr-card { max-width: 300px; text-align: center; }
 .qr-code-wrap { display: inline-flex; padding: 12px; background: #fff; border-radius: 12px; }
+.qr-share-btn { flex-shrink: 0; white-space: nowrap; font-size: 13px; padding: 8px 10px; }
 
 /* ---------- 鹏币钱包 ---------- */
 .wallet-hero {

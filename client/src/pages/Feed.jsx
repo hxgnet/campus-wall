@@ -61,7 +61,7 @@ export default function Feed() {
         <div className="top-search-wrap">
           <div className="search-bar search-trigger" onClick={() => navigate('/search')}>
             <input placeholder="搜索帖子内容、标签或同学..." readOnly />
-            <button type="button" className="btn btn-secondary" onClick={(e) => { e.stopPropagation(); setShowQR(true); }} title="分享主页二维码">🔗</button>
+            <button type="button" className="btn btn-secondary qr-share-btn" onClick={(e) => { e.stopPropagation(); setShowQR(true); }} title="分享主页二维码">分享主页</button>
             <button type="button" className="btn btn-primary">🔍</button>
           </div>
         </div>
