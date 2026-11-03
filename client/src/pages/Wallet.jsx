@@ -12,7 +12,7 @@ const TYPE_LABEL = {
 
 export default function Wallet() {
   const navigate = useNavigate();
-  const [data, setData] = useState(null);
+  const [data, setData] = useState({ coins: 0, logs: [], sent: [], received: [] });
 
   useEffect(() => {
     let alive = true;
@@ -26,8 +26,6 @@ export default function Wallet() {
       .finally(() => clearTimeout(timer));
     return () => { alive = false; clearTimeout(timer); };
   }, []);
-
-  if (!data) return <div className="page"><div className="container"><div className="loading">加载中...</div></div></div>;
 
   let history = data.logs || [];
   if (!history.length) {
