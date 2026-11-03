@@ -199,7 +199,7 @@ async function notify(userId, type, fromUser, postId, content) {
 // 同时不返回 client_ip / user_agent，避免隐私信息流向公开接口。
 const PUBLIC_POST_FIELDS = `
   p.id, p.category, p.content, p.tags, p.images, p.media, p.status, p.likes, p.views, p.created_at,
-  p.is_anonymous, p.is_staff, p.staff_role, p.is_hot,
+  p.is_anonymous, p.is_staff, p.staff_role, p.is_hot, p.is_pinned,
   p.quote_post_id, p.activity_signup_required, p.activity_signup_deadline,
   (SELECT qp.content FROM posts qp WHERE qp.id = p.quote_post_id) AS quote_content,
   (SELECT qp.nickname FROM posts qp WHERE qp.id = p.quote_post_id) AS quote_nickname,
@@ -269,22 +269,23 @@ async function penalizeAndMaybeBan(userId, points) {
 
 const normText = (v) => String(v == null ? '' : v).replace(/\s+/g, '').toLowerCase();
 
-// 根据年级（入学年份）自动判定标签：
-// 本年 - 年级 > 3 且本年已过 9 月 1 日 → 毕业生(graduate)，否则在校生(student)
-// 仅对管理员设置的年级生效（grade_set_by_admin = TRUE）
-function computeGraduateTag(grade) {
-  if (grade == null) return null;
+// 根据学部与入学年份自动判定身份标签：
+// 小学部满 6 年、初中部满 3 年，且当年已过 9 月 1 日 → 毕业生(graduate)
+// 仅对管理员确认过年级的用户生效（grade_set_by_admin = TRUE）
+function computeGraduateTag(grade, department) {
+  if (grade == null || !department) return null;
   const now = new Date();
   const currentYear = now.getFullYear();
   const pastSept1 = now.getMonth() > 8 || (now.getMonth() === 8 && now.getDate() >= 1);
-  if (currentYear - Number(grade) > 3 && pastSept1) return 'graduate';
+  const years = department === 'primary' ? 6 : 3;
+  if (currentYear - Number(grade) >= years && pastSept1) return 'graduate';
   return 'student';
 }
 
 async function refreshUserTag(userId) {
-  const u = await db.prepare(`SELECT grade, grade_set_by_admin FROM users WHERE id = ?`).get(userId);
-  if (!u || !u.grade_set_by_admin || u.grade == null) return;
-  const tag = computeGraduateTag(u.grade);
+  const u = await db.prepare(`SELECT grade, department, grade_set_by_admin FROM users WHERE id = ?`).get(userId);
+  if (!u || !u.grade_set_by_admin || u.grade == null || !u.department) return;
+  const tag = computeGraduateTag(u.grade, u.department);
   await db.prepare(`UPDATE users SET tag = ? WHERE id = ?`).run(tag, userId);
 }
 
@@ -373,7 +374,7 @@ app.get('/api/auth/me', auth, async (req, res) => {
     `SELECT uid, username, nickname, avatar, bio, role, created_at, profile_public,
             real_name, class_name, address, email, wechat, qq, phone,
             show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
-            grade, tag, grade_set_by_admin, show_uid, custom_tag, tag_color, coins
+            grade, tag, grade_set_by_admin, show_uid, custom_tag, tag_color, coins, department
      FROM users WHERE id = ?`
   ).get(req.user.dbId);
   // 经纬度(latitude/longitude)永远不返回给任何用户，包括本人
@@ -400,6 +401,17 @@ app.put('/api/auth/profile', auth, async (req, res) => {
   if (req.body.profile_public !== undefined) {
     sets.push('profile_public = ?');
     params.push(req.body.profile_public === true || req.body.profile_public === 'true' || req.body.profile_public === 1);
+  }
+  // 学部由用户选择；更换学部后原管理员确认的年级失效，需要超管重新确认
+  if (req.body.department !== undefined) {
+    const dep = ['primary', 'middle'].includes(req.body.department) ? req.body.department : null;
+    const cur = await db.prepare(`SELECT department FROM users WHERE id = ?`).get(req.user.dbId);
+    sets.push('department = ?');
+    params.push(dep);
+    if (dep && cur && cur.department && cur.department !== dep) {
+      sets.push('grade_set_by_admin = ?', 'tag = ?');
+      params.push(false, null);
+    }
   }
   // 用户可自行设置入学年份（grade），但不会触发毕业生标签自动计算。
   // 毕业生标签仅由超级管理员设置并确认（grade_set_by_admin = TRUE 时才会自动刷新）。
@@ -450,7 +462,7 @@ app.get('/api/users/:id', async (req, res) => {
     `SELECT id, uid, username, nickname, avatar, bio, created_at, profile_public, reputation, role,
             real_name, class_name, address, email, wechat, qq, phone,
             show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone,
-            grade, tag, show_uid, custom_tag, tag_color
+            grade, department, tag, show_uid, custom_tag, tag_color
      FROM users WHERE uid = ?`
   ).get(req.params.id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
@@ -458,7 +470,7 @@ app.get('/api/users/:id', async (req, res) => {
   const out = {
     username: user.username, nickname: user.nickname, avatar: user.avatar,
     bio: user.bio, created_at: user.created_at, profile_public: !!user.profile_public, postCount,
-    grade: user.grade, tag: user.tag, role: user.role,
+    grade: user.grade, department: user.department, tag: user.tag, role: user.role,
     custom_tag: user.custom_tag, tag_color: user.tag_color,
   };
   // 信誉分仅对本人与超级管理员可见
@@ -530,6 +542,8 @@ app.get('/api/posts', async (req, res) => {
   let where = "WHERE p.status = 'approved'";
   const params = [];
   if (category && category !== 'all') { where += ' AND p.category = ?'; params.push(category); }
+  // 首页信息流排除置顶帖，置顶帖单独在顶部轮播位展示，避免重复出现
+  if (String(req.query.excludePinned || '') === '1') where += ' AND p.is_pinned = FALSE';
   // 匿名帖不出现在任何用户主页，避免通过主页反推作者（userId 为对外 uid）
   if (userId) { where += ' AND p.user_id = (SELECT id FROM users WHERE uid = ?) AND p.is_anonymous = FALSE'; params.push(userId); }
   let orderBy = 'p.id DESC';
@@ -567,6 +581,20 @@ app.get('/api/posts/hot', async (req, res) => {
      WHERE p.status = 'approved' ORDER BY p.is_hot DESC, (p.likes + p.views * 0.1) DESC LIMIT 10`
   ).all();
   posts.forEach(p => { p.images = []; p.media = parseMedia(p.media); p.tags = []; });
+  res.json(posts);
+});
+
+app.get('/api/posts/pinned', async (req, res) => {
+  const posts = await db.prepare(
+    `SELECT ${PUBLIC_POST_FIELDS} FROM posts p LEFT JOIN users u ON u.id = p.user_id
+     WHERE p.status = 'approved' AND p.is_pinned = TRUE
+     ORDER BY p.pinned_at DESC NULLS LAST, p.id DESC LIMIT 20`
+  ).all();
+  posts.forEach((p) => {
+    p.images = p.images ? JSON.parse(p.images) : [];
+    p.media = parseMedia(p.media);
+    p.tags = p.tags ? JSON.parse(p.tags) : [];
+  });
   res.json(posts);
 });
 
@@ -1060,7 +1088,7 @@ app.get('/api/admin/posts', adminAuth, async (req, res) => {
   const posts = await db.prepare(
     `SELECT p.id, p.category, p.content, p.tags, p.images, p.media, p.status, p.review_note,
             p.likes, p.views, p.created_at, p.quote_post_id, p.activity_signup_required,
-            p.is_anonymous, p.is_hot, p.nickname, p.client_ip, p.user_agent, p.is_staff, p.staff_role,
+            p.is_anonymous, p.is_hot, p.is_pinned, p.nickname, p.client_ip, p.user_agent, p.is_staff, p.staff_role,
             CASE WHEN p.user_id IS NULL THEN NULL ELSE u.uid END AS user_id
      FROM posts p LEFT JOIN users u ON u.id = p.user_id
      ${where} ORDER BY p.id DESC LIMIT ? OFFSET ?`
@@ -1109,7 +1137,7 @@ app.get('/api/admin/posts/:id', adminAuth, async (req, res) => {
 });
 
 app.put('/api/admin/posts/:id', adminAuth, async (req, res) => {
-  const { status, is_hot, note, reason } = req.body || {};
+  const { status, is_hot, is_pinned, note, reason } = req.body || {};
   const noteText = typeof note === 'string' ? note : (typeof reason === 'string' ? reason : undefined);
   const target = await db.prepare(`SELECT id, user_id, content, review_note FROM posts WHERE id = ?`).get(req.params.id);
   if (!target) return res.status(404).json({ error: '帖子不存在' });
@@ -1133,6 +1161,20 @@ app.put('/api/admin/posts/:id', adminAuth, async (req, res) => {
     }
     sets.push('is_hot = ?');
     params.push(is_hot === true || is_hot === 'true' || is_hot === 1);
+  }
+  if (is_pinned !== undefined) {
+    if (req.adminRole !== 'super') return res.status(403).json({ error: '仅超级管理员可置顶' });
+    const next = is_pinned === true || is_pinned === 'true' || is_pinned === 1;
+    if (next) {
+      const post = await db.prepare(`SELECT status FROM posts WHERE id = ?`).get(req.params.id);
+      if (!post) return res.status(404).json({ error: '帖子不存在' });
+      if (post.status !== 'approved') return res.status(400).json({ error: '仅已通过的帖子可置顶' });
+      sets.push('is_pinned = ?', 'pinned_at = ?');
+      params.push(true, NOW_TEXT);
+    } else {
+      sets.push('is_pinned = ?', 'pinned_at = ?');
+      params.push(false, null);
+    }
   }
   if (sets.length === 0) return res.json({ ok: true });
   params.push(req.params.id);
@@ -1274,15 +1316,15 @@ app.put('/api/admin/reports/:id', adminAuth, async (req, res) => {
 app.get('/api/admin/users', superAuth, async (req, res) => {
   // 刷新所有管理员设置过年级的用户标签（处理跨年后自动变为毕业生）
   try {
-    const graded = await db.prepare(`SELECT id, grade FROM users WHERE grade_set_by_admin = TRUE AND grade IS NOT NULL`).all();
+    const graded = await db.prepare(`SELECT id, grade, department FROM users WHERE grade_set_by_admin = TRUE AND grade IS NOT NULL`).all();
     for (const u of graded) {
-      const tag = computeGraduateTag(u.grade);
+      const tag = computeGraduateTag(u.grade, u.department);
       await db.prepare(`UPDATE users SET tag = ? WHERE id = ? AND (tag IS DISTINCT FROM ?)`).run(tag, u.id, tag);
     }
   } catch (e) { console.error('[tag-refresh] 失败:', e.message); }
   // 超级管理员可查看用户全部个人信息（含账号、密码哈希等敏感字段）
   const select = `uid, username, password_hash, nickname, avatar, role, reputation, banned, banned_reason, banned_at, created_at,
-       grade, tag, grade_set_by_admin, custom_tag, tag_color, coins, latitude, longitude,
+       grade, department, tag, grade_set_by_admin, custom_tag, tag_color, coins, latitude, longitude,
        real_name, class_name, address, email, wechat, qq, phone, bio`;
   try {
     const users = await db.prepare(`SELECT ${select} FROM users ORDER BY id DESC`).all();
@@ -1299,7 +1341,7 @@ app.get('/api/admin/users/:uid/detail', superAuth, async (req, res) => {
     const u = await db.prepare(
       `SELECT id, uid, username, password_hash, password_enc, nickname, avatar, bio, role, reputation,
               banned, banned_reason, banned_at, created_at, agreed_at, profile_public, show_uid,
-              grade, tag, grade_set_by_admin, custom_tag, tag_color, coins, latitude, longitude,
+              grade, department, tag, grade_set_by_admin, custom_tag, tag_color, coins, latitude, longitude,
               real_name, class_name, address, email, wechat, qq, phone,
               show_real_name, show_class_name, show_address, show_email, show_wechat, show_qq, show_phone
        FROM users WHERE uid = ?`
@@ -1447,6 +1489,12 @@ app.put('/api/admin/users/:uid/profile', superAuth, async (req, res) => {
       sets.push(`${f} = ?`);
       params.push(req.body[f] === null ? '' : String(req.body[f]));
     }
+  }
+  // 学部由管理员确认
+  if (req.body.department !== undefined) {
+    const dep = ['primary', 'middle'].includes(req.body.department) ? req.body.department : null;
+    sets.push('department = ?');
+    params.push(dep);
   }
   // 年级由管理员设置
   if (req.body.grade !== undefined) {

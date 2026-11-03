@@ -37,6 +37,7 @@ export default function Profile() {
     show_email: false, show_wechat: false, show_qq: false, show_phone: false, show_uid: false,
   });
   const [grade, setGrade] = useState('');
+  const [department, setDepartment] = useState('');
   const [gradeSetByAdmin, setGradeSetByAdmin] = useState(false);
   const [coins, setCoins] = useState(null);
   const [showTransfer, setShowTransfer] = useState(false);
@@ -87,6 +88,7 @@ export default function Profile() {
           show_uid: !!me.show_uid,
         });
         setGrade(me.grade != null ? String(me.grade) : '');
+        setDepartment(me.department || '');
         setGradeSetByAdmin(!!me.grade_set_by_admin);
         setCoins(me.coins);
       }).catch(() => {});
@@ -104,11 +106,16 @@ export default function Profile() {
   const saveProfile = async () => {
     try {
       const payload = { nickname, bio, ...extra, ...showFields };
+      payload.department = department || null;
       if (grade.trim() !== '') payload.grade = Number(grade);
       else payload.grade = null;
       await api.updateProfile(payload);
       if (isMe) updateUser({ ...user, nickname, bio });
-      setProfile({ ...profile, nickname, bio, grade: grade.trim() !== '' ? Number(grade) : null, show_uid: showFields.show_uid });
+      setProfile({ ...profile, nickname, bio, department: department || null, grade: grade.trim() !== '' ? Number(grade) : null, show_uid: showFields.show_uid });
+      if (department !== (profile.department || '')) {
+        setGradeSetByAdmin(false);
+        setProfile((p) => ({ ...p, tag: null, department: department || null, grade_set_by_admin: false }));
+      }
       setEditing(false);
     } catch (e) { alert(e.message); }
   };
@@ -160,7 +167,7 @@ export default function Profile() {
     e.preventDefault();
     const amount = Number(transferAmount);
     if (!transferTo.trim()) { alert('请输入收款用户 ID'); return; }
-    if (!Number.isInteger(amount) || amount <= 0) { alert('请输入正确的金币数量'); return; }
+    if (!Number.isInteger(amount) || amount <= 0) { alert('请输入正确的鹏币数量'); return; }
     try {
       const r = await api.transferCoins(transferTo.trim(), amount, transferNote);
       setCoins(r.coins);
@@ -202,10 +209,16 @@ export default function Profile() {
               <input className="form-input" style={{ marginBottom: 8, textAlign: 'center' }} value={nickname} onChange={(e) => setNickname(e.target.value)} />
               <input className="form-input" style={{ marginBottom: 8 }} placeholder="个性签名" value={bio} onChange={(e) => setBio(e.target.value)} />
               <div className="profile-field" style={{ marginBottom: 12 }}>
-                <label>入学年份</label>
+                <label>所属学部</label>
+                <select className="form-input" value={department} onChange={(e) => setDepartment(e.target.value)}>
+                  <option value="">请选择</option>
+                  <option value="primary">小学部</option>
+                  <option value="middle">初中部</option>
+                </select>
+                <label style={{ marginTop: 8 }}>入学年份</label>
                 <input className="form-input" type="number" placeholder="如 2023" value={grade} onChange={(e) => setGrade(e.target.value)} />
                 <p className="anon-hint" style={{ marginTop: 4, textAlign: 'left' }}>
-                  可自行填写入学年份，但「毕业生」标签仅由超级管理员设置并确认，不会因入学满 3 年自动获得。
+                  可自行填写入学年份。毕业生称号需超管确认：小学部满 6 年、初中部满 3 年，且仅超管确认的年级才会自动获得。
                 </p>
                 <label className="anon-toggle" style={{ marginTop: 6, fontSize: 12 }}>
                   <input type="checkbox" checked={showFields.show_uid} onChange={(e) => setShowFields({ ...showFields, show_uid: e.target.checked })} />
@@ -240,10 +253,12 @@ export default function Profile() {
                 )}
               </h2>
               {profile.bio && <p style={{ color: 'var(--text-light)', fontSize: 14 }}>{profile.bio}</p>}
-              {((profile.grade != null) || profile.tag || profile.role === 'admin' || profile.role === 'super') && (
+              {((profile.grade != null) || profile.tag || profile.department || profile.role === 'admin' || profile.role === 'super') && (
                 <div className="profile-tags">
                   {profile.role === 'super' && <span className="profile-tag tag-super">🛡️ 超级管理员</span>}
                   {profile.role === 'admin' && <span className="profile-tag tag-admin">🛡️ 管理员</span>}
+                  {profile.department === 'primary' && <span className="profile-tag tag-grade">🏫 小学部</span>}
+                  {profile.department === 'middle' && <span className="profile-tag tag-grade">🏫 初中部</span>}
                   {profile.grade != null && <span className="profile-tag tag-grade">📅 {profile.grade}级</span>}
                   {profile.tag === 'graduate' && <span className="profile-tag tag-graduate">🎓 毕业生</span>}
                   {profile.tag === 'student' && <span className="profile-tag tag-student">📚 在校生</span>}
@@ -264,7 +279,7 @@ export default function Profile() {
               <p style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 8 }}>
                 帖子 {posts.length}
                 {profile.reputation !== undefined && <> · 信誉分 {profile.reputation}</>}
-                {isMe && coins != null && <> · 🪙 {coins} 金币</>}
+                {isMe && coins != null && <> · 🪙 {coins} 鹏币</>}
                 {' '}· 加入于 {profile.created_at?.slice(0, 10)}
               </p>
               {isMe && <button className="btn btn-secondary" style={{ marginTop: 12 }} onClick={() => setEditing(true)}>编辑资料</button>}
@@ -319,11 +334,12 @@ export default function Profile() {
           <div className="detail-card coin-card" style={{ marginBottom: 16 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
               <div>
-                <div style={{ fontSize: 15, fontWeight: 600 }}>🪙 我的金币：{coins ?? 0}</div>
+                <div style={{ fontSize: 15, fontWeight: 600 }}>🪙 我的鹏币：{coins ?? 0}</div>
                 <div className="anon-hint" style={{ marginTop: 4 }}>可向其他同学转账，也可在群聊中发红包</div>
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
                 <button className="btn btn-primary" onClick={() => setShowTransfer(true)}>转账</button>
+                <button className="btn btn-secondary" onClick={() => navigate('/wallet')}>资金记录</button>
                 <button className="btn btn-secondary" onClick={() => navigate('/messages')}>去群聊发红包</button>
               </div>
             </div>
@@ -373,8 +389,8 @@ export default function Profile() {
       {showTransfer && (
         <div className="modal-overlay" onClick={() => setShowTransfer(false)}>
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">🪙 金币转账</div>
-            <div className="modal-sub">当前余额：{coins ?? 0} 金币</div>
+            <div className="modal-title">🪙 鹏币转账</div>
+            <div className="modal-sub">当前余额：{coins ?? 0} 鹏币</div>
             <form onSubmit={transfer}>
               <div className="form-group">
                 <label className="form-label">收款用户 ID</label>

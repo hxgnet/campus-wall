@@ -18,6 +18,7 @@ import GroupChat from './pages/GroupChat.jsx';
 import Apply from './pages/Apply.jsx';
 import Activities from './pages/Activities.jsx';
 import About from './pages/About.jsx';
+import Wallet from './pages/Wallet.jsx';
 import BottomNav from './components/BottomNav.jsx';
 
 export default function App() {
@@ -74,6 +75,7 @@ export default function App() {
           <Route path="/favorites" element={<Favorites />} />
           <Route path="/activities" element={<Activities />} />
           <Route path="/about" element={<About />} />
+          <Route path="/wallet" element={<Wallet />} />
           <Route path="/apply" element={<Apply />} />
           <Route path="/admin" element={<Admin />} />
         </Routes>

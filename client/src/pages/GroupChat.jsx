@@ -86,7 +86,7 @@ export default function GroupChat() {
     try {
       const r = await api.claimRedPacket(packetId);
       setCoins(r.coins);
-      alert(r.already ? `你已领取过该红包（${r.amount} 金币）` : `抢到 ${r.amount} 金币！`);
+      alert(r.already ? `你已领取过该红包（${r.amount} 鹏币）` : `抢到 ${r.amount} 鹏币！`);
       await loadMessages();
     } catch (e) { alert(e.message); }
   };
@@ -96,7 +96,7 @@ export default function GroupChat() {
     setError('');
     const total = Number(packetTotal);
     const count = Number(packetCount);
-    if (!Number.isInteger(total) || total <= 0) { setError('请输入正确的红包总金币'); return; }
+    if (!Number.isInteger(total) || total <= 0) { setError('请输入正确的红包总鹏币'); return; }
     if (!Number.isInteger(count) || count <= 0) { setError('请输入正确的红包个数'); return; }
     try {
       await api.createRedPacket(id, total, count, packetNote);
@@ -124,7 +124,7 @@ export default function GroupChat() {
       <div className="container">
         <div className="chat-top-links">
           <button className="back-btn" onClick={() => navigate('/messages')}>← 私信中心</button>
-          {coins != null && <span className="coin-badge">🪙 {coins} 金币</span>}
+          {coins != null && <span className="coin-badge">🪙 {coins} 鹏币</span>}
         </div>
         <div className="chat-header">
           <div className="avatar">{group?.is_all ? '🏫' : '👥'}</div>
@@ -177,11 +177,11 @@ export default function GroupChat() {
                         <div className="redpacket-note">{m.share.packet.note}</div>
                         <div className="redpacket-meta">
                           {m.share.packet.remaining_count > 0
-                            ? `剩余 ${m.share.packet.remaining} 金币 / ${m.share.packet.count} 个`
+                            ? `剩余 ${m.share.packet.remaining} 鹏币 / ${m.share.packet.count} 个`
                             : `已抢完（${m.share.packet.count} 个红包）`}
                         </div>
                         {m.share.packet.my_amount != null ? (
-                          <div className="redpacket-claimed">已领取 {m.share.packet.my_amount} 金币</div>
+                          <div className="redpacket-claimed">已领取 {m.share.packet.my_amount} 鹏币</div>
                         ) : m.share.packet.remaining_count > 0 ? (
                           <button className="btn btn-primary redpacket-btn" onClick={() => claim(m.share.packet.id)}>开红包</button>
                         ) : (
@@ -237,11 +237,11 @@ export default function GroupChat() {
         <div className="modal-overlay" onClick={() => setShowPacket(false)}>
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <div className="modal-title">🧧 发群红包</div>
-            <div className="modal-sub">从我的金币中扣除，群成员可抢</div>
+            <div className="modal-sub">从我的鹏币中扣除，群成员可抢</div>
             {error && <div className="form-error">{error}</div>}
             <form onSubmit={sendPacket}>
               <div className="form-group">
-                <label className="form-label">总金币（当前余额 {coins ?? 0}）</label>
+                <label className="form-label">总鹏币（当前余额 {coins ?? 0}）</label>
                 <input className="form-input" type="number" min="1" value={packetTotal} onChange={(e) => setPacketTotal(e.target.value)} placeholder="例如 100" />
               </div>
               <div className="form-group">

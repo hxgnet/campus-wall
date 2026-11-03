@@ -63,6 +63,7 @@ export const api = {
     return request(`/posts?${q}`);
   },
   getHotPosts: () => request('/posts/hot'),
+  getPinnedPosts: () => request('/posts/pinned'),
   getPost: (id) => request(`/posts/${id}`),
   getMyPosts: () => request('/my/posts'),
   createPost: (formData) =>
@@ -152,10 +153,13 @@ export const api = {
     request('/stickers', { method: 'POST', body: JSON.stringify({ url, name }) }),
   deleteSticker: (id) => request(`/stickers/${id}`, { method: 'DELETE' }),
 
-  // Coins（金币）
+  // Coins（鹏币）
   getCoins: () => request('/coins'),
   transferCoins: (to, amount, note = '') =>
     request('/coins/transfer', { method: 'POST', body: JSON.stringify({ to, amount, note }) }),
+  adminAdjustCoins: (uid, amount, reason) =>
+    request(`/admin/users/${uid}/coins`, { method: 'POST', body: JSON.stringify({ amount, reason }), headers: adminHeaders() }),
+  getAdminCoinStats: () => request('/admin/coins/stats', { headers: adminHeaders() }),
 
   // Groups（群聊）
   getGroups: () => request('/groups'),
@@ -218,6 +222,8 @@ export const api = {
     request(`/admin/posts/${id}`, { method: 'PUT', body: JSON.stringify({ status, note }), headers: adminHeaders() }),
   setPostHot: (id, isHot) =>
     request(`/admin/posts/${id}`, { method: 'PUT', body: JSON.stringify({ is_hot: isHot }), headers: adminHeaders() }),
+  setPostPin: (id, isPinned) =>
+    request(`/admin/posts/${id}`, { method: 'PUT', body: JSON.stringify({ is_pinned: isPinned }), headers: adminHeaders() }),
   adminDeletePost: (id, reason = '') =>
     fetch(BASE + `/admin/posts/${id}`, {
       method: 'DELETE',

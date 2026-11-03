@@ -110,9 +110,14 @@ module.exports.register = function register(ctx) {
     res.json({ ok: true });
   });
 
-  // ---------- 金币转账 ----------
+  // ---------- 鹏币（原金币）----------
   router.get('/coins', auth, async (req, res) => {
     const me = await db.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId);
+    const logs = await db.prepare(
+      `SELECT l.*,
+              (SELECT nickname FROM users WHERE uid = l.peer_uid) AS peer_nickname
+       FROM coin_logs l WHERE l.user_uid = ? ORDER BY l.id DESC LIMIT 100`
+    ).all(req.user.uid);
     const sent = await db.prepare(
       `SELECT t.*, (SELECT nickname FROM users WHERE uid = t.to_uid) AS peer_nickname
        FROM coin_transfers t WHERE t.from_uid = ? ORDER BY t.id DESC LIMIT 50`
@@ -121,7 +126,7 @@ module.exports.register = function register(ctx) {
       `SELECT t.*, (SELECT nickname FROM users WHERE uid = t.from_uid) AS peer_nickname
        FROM coin_transfers t WHERE t.to_uid = ? ORDER BY t.id DESC LIMIT 50`
     ).all(req.user.uid);
-    res.json({ coins: me ? me.coins : 0, sent, received });
+    res.json({ coins: me ? me.coins : 0, logs, sent, received });
   });
 
   router.post('/coins/transfer', auth, async (req, res) => {
@@ -136,7 +141,7 @@ module.exports.register = function register(ctx) {
     const peer = await db.prepare(`SELECT id, uid, nickname FROM users WHERE uid = ?`).get(to);
     if (!peer) return res.status(404).json({ error: '用户不存在' });
     const me = await db.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId);
-    if (!me || Number(me.coins) < amount) return res.status(400).json({ error: '金币不足' });
+    if (!me || Number(me.coins) < amount) return res.status(400).json({ error: '鹏币不足' });
     let balance = 0;
     await db.transaction(async (tx) => {
       await tx.prepare(`UPDATE users SET coins = coins - ? WHERE id = ?`).run(amount, req.user.dbId);
@@ -144,10 +149,81 @@ module.exports.register = function register(ctx) {
       await tx.prepare(
         `INSERT INTO coin_transfers (from_uid, to_uid, amount, note) VALUES (?, ?, ?, ?) RETURNING id`
       ).run(req.user.uid, peer.uid, amount, note);
-      balance = (await tx.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId)).coins;
+      const fb = (await tx.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId)).coins;
+      const tb = (await tx.prepare(`SELECT coins FROM users WHERE id = ?`).get(peer.id)).coins;
+      await tx.prepare(
+        `INSERT INTO coin_logs (user_uid, delta, balance_after, type, reason, peer_uid)
+         VALUES (?, ?, ?, 'transfer_out', ?, ?) RETURNING id`
+      ).run(req.user.uid, -amount, Number(fb), note, peer.uid);
+      await tx.prepare(
+        `INSERT INTO coin_logs (user_uid, delta, balance_after, type, reason, peer_uid)
+         VALUES (?, ?, ?, 'transfer_in', ?, ?) RETURNING id`
+      ).run(peer.uid, amount, Number(tb), note, req.user.uid);
+      balance = fb;
     });
-    await notify(peer.id, 'system', req.user.uid, null, `收到 ${amount} 金币转账${note ? `：${note}` : ''}`);
+    await notify(peer.id, 'system', req.user.uid, null, `收到 ${amount} 鹏币转账${note ? `：${note}` : ''}`);
     res.json({ ok: true, coins: balance });
+  });
+
+  // ---------- 超管鹏币管理 ----------
+  router.post('/admin/users/:uid/coins', superAuth, async (req, res) => {
+    const amount = Number(req.body.amount);
+    const reason = String(req.body.reason || '').trim();
+    if (!Number.isInteger(amount) || amount === 0) return res.status(400).json({ error: '数量必须为非零整数' });
+    if (!reason) return res.status(400).json({ error: '必须说明理由' });
+    if (reason.length > 200) return res.status(400).json({ error: '理由最多 200 字' });
+    const target = await db.prepare(`SELECT id, uid, nickname, coins FROM users WHERE uid = ?`).get(req.params.uid);
+    if (!target) return res.status(404).json({ error: '用户不存在' });
+    const before = Number(target.coins || 0);
+    const after = Math.max(0, before + amount);
+    const delta = after - before;
+    if (delta === 0) return res.status(400).json({ error: '该用户余额已为 0，无法继续收回' });
+    const adminName = req.adminUser ? (req.adminUser.nickname || req.adminUser.uid) : '超级管理员';
+    const type = delta > 0 ? 'admin_grant' : 'admin_deduct';
+    await db.transaction(async (tx) => {
+      await tx.prepare(`UPDATE users SET coins = ? WHERE id = ?`).run(after, target.id);
+      await tx.prepare(
+        `INSERT INTO coin_logs (user_uid, delta, balance_after, type, reason, admin_name)
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+      ).run(target.uid, delta, after, type, reason, adminName);
+    });
+    await notify(target.id, 'system', 'system', null,
+      `超级管理员${delta > 0 ? '发放' : '收回'} ${Math.abs(delta)} 鹏币：${reason}`);
+    await logAdminAction(req, delta > 0 ? '发放鹏币' : '收回鹏币', 'user', target.uid,
+      reason, `余额 ${before} → ${after}`);
+    res.json({ ok: true, coins: after, delta });
+  });
+
+  router.get('/admin/coins/stats', superAuth, async (req, res) => {
+    const agg = await db.prepare(
+      `SELECT COALESCE(SUM(coins), 0) AS total_balance,
+              COUNT(*) AS total_users,
+              COUNT(*) FILTER (WHERE coins > 0) AS holders
+       FROM users`
+    ).get();
+    const flow = await db.prepare(
+      `SELECT COALESCE(SUM(delta) FILTER (WHERE delta > 0), 0) AS total_in,
+              COALESCE(-SUM(delta) FILTER (WHERE delta < 0), 0) AS total_out
+       FROM coin_logs`
+    ).get();
+    const logs = await db.prepare(
+      `SELECT l.*,
+              (SELECT nickname FROM users WHERE uid = l.user_uid) AS nickname,
+              (SELECT username FROM users WHERE uid = l.user_uid) AS username
+       FROM coin_logs l ORDER BY l.id DESC LIMIT 60`
+    ).all();
+    const top = await db.prepare(
+      `SELECT uid, nickname, username, coins FROM users WHERE coins > 0 ORDER BY coins DESC, id ASC LIMIT 20`
+    ).all();
+    res.json({
+      total_balance: Number(agg.total_balance || 0),
+      total_users: Number(agg.total_users || 0),
+      holders: Number(agg.holders || 0),
+      total_in: Number(flow.total_in || 0),
+      total_out: Number(flow.total_out || 0),
+      logs,
+      top,
+    });
   });
 
   // ---------- 群聊 ----------
@@ -348,13 +424,13 @@ module.exports.register = function register(ctx) {
     const count = Number(req.body.count);
     const note = String(req.body.note || '恭喜发财，大吉大利').slice(0, 60);
     if (!Number.isInteger(total) || total <= 0 || total > 100000) {
-      return res.status(400).json({ error: '红包总金币需为 1-100000 的整数' });
+      return res.status(400).json({ error: '红包总鹏币需为 1-100000 的整数' });
     }
     if (!Number.isInteger(count) || count <= 0 || count > 100 || count > total) {
-      return res.status(400).json({ error: '红包个数需为 1-100 且不超过总金币' });
+      return res.status(400).json({ error: '红包个数需为 1-100 且不超过总鹏币' });
     }
     const me = await db.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId);
-    if (!me || Number(me.coins) < total) return res.status(400).json({ error: '金币不足' });
+    if (!me || Number(me.coins) < total) return res.status(400).json({ error: '鹏币不足' });
     let packetId = null;
     let messageId = null;
     let balance = 0;
@@ -409,7 +485,7 @@ module.exports.register = function register(ctx) {
       coins = (await tx.prepare(`SELECT coins FROM users WHERE id = ?`).get(req.user.dbId)).coins;
     });
     const sender = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(packet.sender_uid);
-    if (sender) await notify(sender.id, 'system', req.user.uid, null, `有人领取了你的红包（${amount} 金币）`);
+    if (sender) await notify(sender.id, 'system', req.user.uid, null, `有人领取了你的红包（${amount} 鹏币）`);
     res.json({ ok: true, amount, already: false, coins });
   });
 

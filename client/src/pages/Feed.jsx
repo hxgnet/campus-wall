@@ -2,12 +2,14 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, CATEGORIES } from '../api.js';
 import PostCard from '../components/PostCard.jsx';
+import PinnedCarousel from '../components/PinnedCarousel.jsx';
 
 export default function Feed() {
   const navigate = useNavigate();
   const [category, setCategory] = useState('all');
   const [posts, setPosts] = useState([]);
   const [activities, setActivities] = useState([]);
+  const [pinned, setPinned] = useState([]);
   const [categories, setCategories] = useState(CATEGORIES);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -19,7 +21,7 @@ export default function Feed() {
     setLoading(true);
     try {
       const curPage = reset ? 1 : page;
-      const data = await api.getPosts({ category, page: curPage, pageSize: 20, sort });
+      const data = await api.getPosts({ category, page: curPage, pageSize: 20, sort, excludePinned: 1 });
       setPosts((prev) => (reset ? data.posts : [...prev, ...data.posts]));
       setHasMore(data.total > (reset ? 0 : posts.length) + data.posts.length);
       setPage((p) => (reset ? 2 : p + 1));
@@ -29,6 +31,8 @@ export default function Feed() {
 
   useEffect(() => { loadPosts(true); /* eslint-disable-next-line */ }, [category, sort]);
   useEffect(() => {
+    const loadPinned = () => api.getPinnedPosts().then(setPinned).catch(() => {});
+    loadPinned();
     api.getCategories().then((list) => { if (Array.isArray(list) && list.length) setCategories(list); }).catch(() => {});
     api.getPosts({ category: '活动', page: 1, pageSize: 5, sort: 'new' })
       .then((d) => setActivities(d.posts || [])).catch(() => {});
@@ -38,7 +42,7 @@ export default function Feed() {
   // 依赖 category/sort：否则切到某个板块后再回到前台，会刷新回「全部」
   useEffect(() => {
     const onVisible = () => {
-      if (document.visibilityState === 'visible') loadPosts(true);
+      if (document.visibilityState === 'visible') { loadPosts(true); api.getPinnedPosts().then(setPinned).catch(() => {}); }
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
@@ -58,6 +62,8 @@ export default function Feed() {
           </div>
         </div>
 
+        <PinnedCarousel posts={pinned} onOpen={(id) => navigate(`/post/${id}`)} />
+
         <div className="hero-card">
           <div className="hero-kicker">SHISHI PENGSHAN EXPERIMENTAL SCHOOL</div>
           <div className="hero-title">鹏山校园墙</div>
@@ -72,13 +78,13 @@ export default function Feed() {
 
         <div className="feed-toolbar">
           <div className="toolbar-scroll">
+            <button className={`sort-tab ${sort === 'new' ? 'active' : ''}`} onClick={() => setSort('new')}>🆕 最新</button>
+            <button className={`sort-tab ${sort === 'hot' ? 'active' : ''}`} onClick={() => setSort('hot')}>🔥 最热</button>
+            <span className="toolbar-divider" />
             <button className={`cat-tab ${category === 'all' ? 'active' : ''}`} onClick={() => setCategory('all')}>🌟 全部</button>
             {categories.map((c) => (
               <button key={c.name} className={`cat-tab ${category === c.name ? 'active' : ''}`} onClick={() => setCategory(c.name)}>{c.icon} {c.name}</button>
             ))}
-            <span className="toolbar-divider" />
-            <button className={`sort-tab ${sort === 'new' ? 'active' : ''}`} onClick={() => setSort('new')}>🆕 最新</button>
-            <button className={`sort-tab ${sort === 'hot' ? 'active' : ''}`} onClick={() => setSort('hot')}>🔥 热门</button>
           </div>
         </div>
 

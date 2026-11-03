@@ -20,6 +20,9 @@ export default function Admin() {
   const [alerts, setAlerts] = useState([]);
   const [detail, setDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [coinStats, setCoinStats] = useState(null);
+  const [coinForm, setCoinForm] = useState({ uid: '', amount: '', reason: '' });
+  const [coinBusy, setCoinBusy] = useState(false);
   const [userDetail, setUserDetail] = useState(null);
   const [userDetailLoading, setUserDetailLoading] = useState(false);
   const [notifyContent, setNotifyContent] = useState('');
@@ -88,6 +91,8 @@ export default function Admin() {
       try { setAlerts(await api.adminAlerts()); } catch (e) { alert(e.message); }
     } else if (tab === 'bans') {
       try { setBans(await api.adminBans()); } catch (e) { alert(e.message); }
+    } else if (tab === 'coins') {
+      try { setCoinStats(await api.getAdminCoinStats()); } catch (e) { alert(e.message); }
     } else if (tab === 'applications') {
       setAppLoading(true);
       try { setApplications(await api.getAdminApplications(appFilter)); } catch (e) { alert(e.message); }
@@ -155,7 +160,32 @@ export default function Admin() {
     } catch (e) { alert(e.message); }
   };
 
-  // 删除帖子下的评论（管理员 / 超管）
+  // 超管置顶 / 取消置顶（多个置顶帖会在首页轮播位循环播放）
+  const togglePin = async (post) => {
+    try {
+      const next = !post.is_pinned;
+      await api.setPostPin(post.id, next);
+      setPosts((prev) => prev.map((p) => (p.id === post.id ? { ...p, is_pinned: next } : p)));
+      setDetail((d) => (d && d.post.id === post.id ? { ...d, post: { ...d.post, is_pinned: next } } : d));
+    } catch (e) { alert(e.message); }
+  };
+
+  // 超管发放 / 收回鹏币
+  const adjustCoins = async (uid, rawAmount, reason, sign = 1) => {
+    const amount = Number(rawAmount);
+    if (!uid) { alert('请输入用户 UID'); return; }
+    if (!Number.isInteger(amount) || amount <= 0) { alert('请输入正整数数量'); return; }
+    if (!reason.trim()) { alert('必须填写理由'); return; }
+    setCoinBusy(true);
+    try {
+      const r = await api.adminAdjustCoins(uid.trim(), sign * amount, reason.trim());
+      alert(`操作成功，${sign > 0 ? '发放' : '收回'} ${Math.abs(r.delta)} 鹏币，当前余额 ${r.coins}`);
+      setCoinForm({ uid: '', amount: '', reason: '' });
+      if (tab === 'coins') setCoinStats(await api.getAdminCoinStats());
+      if (userDetail && userDetail.user.uid === uid.trim()) await openUserDetail(uid.trim());
+    } catch (e) { alert(e.message); }
+    finally { setCoinBusy(false); }
+  };
   const deleteCommentAdmin = async (cid) => {
     if (!confirm('确定删除该评论吗？')) return;
     try {
@@ -283,6 +313,10 @@ export default function Admin() {
         username: d.user.username || '',
         custom_tag: d.user.custom_tag || '',
         tag_color: d.user.tag_color || '#ff3b30',
+        department: d.user.department || '',
+        grade: d.user.grade != null ? String(d.user.grade) : '',
+        coinAmount: '',
+        coinReason: '',
       });
     } catch (e) { alert(e.message); }
     finally { setUserDetailLoading(false); }
@@ -442,6 +476,22 @@ export default function Admin() {
     } catch (e) { alert(e.message); }
   };
 
+  // 超管确认学部与入学年份（小学部满 6 年、初中部满 3 年自动获得毕业生称号）
+  const saveUserGrade = async () => {
+    if (!userDetail) return;
+    if (!userEdit.department) { alert('请先选择学部'); return; }
+    if (!userEdit.grade) { alert('请输入入学年份'); return; }
+    try {
+      await api.adminUpdateUserProfile(userDetail.user.uid, {
+        department: userEdit.department,
+        grade: Number(userEdit.grade),
+      });
+      await openUserDetail(userDetail.user.uid);
+      await load();
+      alert('学部与入学年份已确认，毕业生称号将按规则自动判定');
+    } catch (e) { alert(e.message); }
+  };
+
   // ---------- 超级通知图片 ----------
   const onNotifyImage = async (e) => {
     const file = e.target.files[0];
@@ -553,6 +603,7 @@ export default function Admin() {
               { k: 'applications', l: '📨 申请处理' },
               { k: 'deletion', l: '🗑️ 注销审批' },
               { k: 'users', l: '👥 用户管理' },
+              { k: 'coins', l: '🪙 鹏币管理' },
               { k: 'categories', l: '🗂️ 板块管理' },
               { k: 'alerts', l: '🛡️ 安全告警' },
               { k: 'bans', l: '⛔ 封禁名单' },
@@ -581,6 +632,7 @@ export default function Admin() {
                     {p.is_anonymous && <span className="anon-badge">匿名</span>}
                     <span className={`status-badge status-${p.status}`}>{p.status === 'pending' ? '待审核' : p.status === 'approved' ? '已通过' : '已拒绝'}</span>
                     {p.is_hot && <span className="status-badge status-approved">🔥 热门</span>}
+                    {p.is_pinned && <span className="status-badge status-approved">📌 置顶</span>}
                     <span className="post-time">{p.created_at}</span>
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--text-light)', marginBottom: 6 }}>@{p.nickname} · ❤️ {p.likes} · 👁️ {p.views}</div>
@@ -597,6 +649,11 @@ export default function Admin() {
                     {p.status === 'approved' && (
                       <button className={p.is_hot ? 'btn-warning' : 'btn-secondary'} onClick={() => toggleHot(p)}>
                         {p.is_hot ? '取消热门' : '🔥 设为热门'}
+                      </button>
+                    )}
+                    {p.status === 'approved' && isSuper && (
+                      <button className={p.is_pinned ? 'btn-warning' : 'btn-secondary'} onClick={() => togglePin(p)}>
+                        {p.is_pinned ? '取消置顶' : '📌 置顶'}
                       </button>
                     )}
                     <button className="btn-success" onClick={() => updateStatus(p.id, 'approved')}>通过</button>
@@ -853,9 +910,11 @@ export default function Admin() {
                   <span className="post-time">{u.created_at}</span>
                   <span style={{ fontSize: 12, color: 'var(--primary)' }}>查看详情 →</span>
                 </div>
-                <div className="post-time" style={{ marginBottom: 4 }}>UID: {u.uid} · 信誉分：{u.reputation != null ? u.reputation : '—'}</div>
-                {(u.grade != null || u.tag) && (
+                <div className="post-time" style={{ marginBottom: 4 }}>UID: {u.uid} · 信誉分：{u.reputation != null ? u.reputation : '—'} · 🪙 鹏币：{u.coins ?? 0}</div>
+                {(u.department || u.grade != null || u.tag) && (
                   <div className="post-time" style={{ marginBottom: 4 }}>
+                    {u.department === 'primary' ? '小学部' : u.department === 'middle' ? '初中部' : ''}
+                    {u.department && u.grade != null && ' · '}
                     {u.grade != null && `${u.grade}级`}
                     {u.grade != null && u.tag && ' · '}
                     {u.tag === 'graduate' ? '🎓 毕业生' : u.tag === 'student' ? '📚 在校生' : ''}
@@ -902,6 +961,67 @@ export default function Admin() {
                 </div>
               </div>
             ))}
+          </>
+        )}
+
+        {tab === 'coins' && isSuper && (
+          <>
+            {coinStats ? (
+              <div className="detail-card" style={{ marginBottom: 12 }}>
+                <h3 style={{ fontSize: 15, marginBottom: 10 }}>🪙 全服务器鹏币资金状况</h3>
+                <div className="admin-detail-grid">
+                  <div className="admin-detail-item"><span className="admin-detail-label">流通总余额</span><span style={{ fontWeight: 700 }}>{coinStats.total_balance}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">持有用户</span><span>{coinStats.holders} / {coinStats.total_users}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">累计发放</span><span style={{ color: 'var(--success)' }}>+{coinStats.total_in}</span></div>
+                  <div className="admin-detail-item"><span className="admin-detail-label">累计收回</span><span style={{ color: 'var(--danger)' }}>-{coinStats.total_out}</span></div>
+                </div>
+              </div>
+            ) : <div className="loading">加载中...</div>}
+
+            <div className="detail-card" style={{ marginBottom: 12 }}>
+              <h3 style={{ fontSize: 15, marginBottom: 10 }}>发放 / 收回鹏币（需填写理由）</h3>
+              <div className="form-group">
+                <input className="form-input" placeholder="用户 UID" value={coinForm.uid} onChange={(e) => setCoinForm({ ...coinForm, uid: e.target.value })} />
+              </div>
+              <div className="form-group">
+                <input className="form-input" type="number" min="1" placeholder="数量（正整数，不设上限）" value={coinForm.amount} onChange={(e) => setCoinForm({ ...coinForm, amount: e.target.value })} />
+              </div>
+              <div className="form-group">
+                <textarea className="form-input" rows="2" placeholder="必填：本次发放 / 收回的理由" value={coinForm.reason} onChange={(e) => setCoinForm({ ...coinForm, reason: e.target.value })} />
+              </div>
+              <div className="admin-actions">
+                <button className="btn-success" disabled={coinBusy} onClick={() => adjustCoins(coinForm.uid, coinForm.amount, coinForm.reason, 1)}>发放</button>
+                <button className="btn-danger" disabled={coinBusy} onClick={() => adjustCoins(coinForm.uid, coinForm.amount, coinForm.reason, -1)}>收回</button>
+              </div>
+            </div>
+
+            {coinStats && coinStats.top.length > 0 && (
+              <div className="detail-card" style={{ marginBottom: 12 }}>
+                <h3 style={{ fontSize: 15, marginBottom: 8 }}>余额排行</h3>
+                {coinStats.top.map((u, i) => (
+                  <div key={u.uid} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--border)', fontSize: 13 }}>
+                    <span>{i + 1}. {u.nickname} <span style={{ color: 'var(--text-light)' }}>@{u.username}</span></span>
+                    <span style={{ fontWeight: 700, color: 'var(--primary)' }}>{u.coins}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {coinStats && (
+              <div className="detail-card">
+                <h3 style={{ fontSize: 15, marginBottom: 8 }}>全服资金流水</h3>
+                {coinStats.logs.length === 0 && <p style={{ color: 'var(--text-light)', fontSize: 13 }}>暂无流水</p>}
+                {coinStats.logs.map((l) => (
+                  <div key={l.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--border)', fontSize: 13 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                      <span>{l.nickname || l.username || l.user_uid} · {l.type}{l.admin_name ? ` · ${l.admin_name}` : ''}</span>
+                      <span style={{ fontWeight: 700, color: l.delta > 0 ? 'var(--success)' : 'var(--danger)' }}>{l.delta > 0 ? '+' : ''}{l.delta}</span>
+                    </div>
+                    <div style={{ color: 'var(--text-light)', fontSize: 12 }}>{l.reason} · 余额 {l.balance_after} · {l.created_at}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </>
         )}
 
@@ -1001,6 +1121,7 @@ export default function Admin() {
                 <div className="admin-detail-item"><span className="admin-detail-label">分类</span><span>{detail.post.category}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">状态</span><span>{detail.post.status}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">热门帖</span><span>{detail.post.is_hot ? '🔥 是' : '否'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">置顶帖</span><span>{detail.post.is_pinned ? '📌 是' : '否'}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">匿名发布</span><span>{detail.is_anonymous ? '是' : '否'}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">评论 / 点赞</span><span>{detail.stats.comments} / {detail.stats.likes}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">发布时间</span><span>{detail.post.created_at}</span></div>
@@ -1075,6 +1196,11 @@ export default function Admin() {
               {detail.post.status === 'approved' && (
                 <button className={detail.post.is_hot ? 'btn btn-warning' : 'btn btn-success'} onClick={() => toggleHot(detail.post)}>
                   {detail.post.is_hot ? '取消热门' : '🔥 设为热门'}
+                </button>
+              )}
+              {isSuper && detail.post.status === 'approved' && (
+                <button className={detail.post.is_pinned ? 'btn btn-warning' : 'btn btn-success'} onClick={() => togglePin(detail.post)}>
+                  {detail.post.is_pinned ? '取消置顶' : '📌 设为置顶'}
                 </button>
               )}
               {isSuper && <button className="btn btn-danger" onClick={() => forceDelete(detail.post.id)}>强制删除</button>}
@@ -1207,8 +1333,35 @@ export default function Admin() {
                 <div className="admin-detail-item"><span className="admin-detail-label">QQ</span><span>{userDetail.user.qq || '—'}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">手机号</span><span>{userDetail.user.phone || '—'}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">个性签名</span><span>{userDetail.user.bio || '—'}</span></div>
+                <div className="admin-detail-item"><span className="admin-detail-label">学部</span><span>{userDetail.user.department === 'primary' ? '小学部' : userDetail.user.department === 'middle' ? '初中部' : '—'}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">入学年份</span><span>{userDetail.user.grade != null ? `${userDetail.user.grade}级` : '—'}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">身份标签</span><span>{userDetail.user.tag === 'graduate' ? '🎓 毕业生' : userDetail.user.tag === 'student' ? '📚 在校生' : '—'}{userDetail.user.grade_set_by_admin ? '（管理员确认）' : ''}</span></div>
+              </div>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>学部与毕业生确认</h4>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <select className="form-input" style={{ width: 150 }} value={userEdit.department || ''} onChange={(e) => setUserEdit({ ...userEdit, department: e.target.value })}>
+                  <option value="">未设置学部</option>
+                  <option value="primary">小学部（满 6 年）</option>
+                  <option value="middle">初中部（满 3 年）</option>
+                </select>
+                <input className="form-input" style={{ width: 140 }} type="number" placeholder="入学年份" value={userEdit.grade || ''} onChange={(e) => setUserEdit({ ...userEdit, grade: e.target.value })} />
+                <button className="btn btn-success" onClick={saveUserGrade}>确认学部与年级</button>
+              </div>
+              <p style={{ marginTop: 6, fontSize: 12, color: 'var(--text-light)' }}>
+                确认后系统按学部自动判定：小学部满 6 年、初中部满 3 年（过 9 月 1 日）授予「毕业生」。
+              </p>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>鹏币操作（当前余额：{userDetail.user.coins ?? 0}）</h4>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <input className="form-input" style={{ width: 150 }} type="number" min="1" placeholder="数量" value={userEdit.coinAmount || ''} onChange={(e) => setUserEdit({ ...userEdit, coinAmount: e.target.value })} />
+                <input className="form-input" style={{ flex: 1, minWidth: 160 }} placeholder="必填理由" value={userEdit.coinReason || ''} onChange={(e) => setUserEdit({ ...userEdit, coinReason: e.target.value })} />
+                <button className="btn btn-success" disabled={coinBusy} onClick={() => adjustCoins(userDetail.user.uid, userEdit.coinAmount, userEdit.coinReason, 1)}>发放</button>
+                <button className="btn btn-danger" disabled={coinBusy} onClick={() => adjustCoins(userDetail.user.uid, userEdit.coinAmount, userEdit.coinReason, -1)}>收回</button>
               </div>
             </div>
 
