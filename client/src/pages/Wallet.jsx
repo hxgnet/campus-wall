@@ -15,7 +15,16 @@ export default function Wallet() {
   const [data, setData] = useState(null);
 
   useEffect(() => {
-    api.getCoins().then(setData).catch(() => setData({ coins: 0, logs: [], sent: [], received: [] }));
+    let alive = true;
+    // 接口冷启动可能较慢，超时后先展示空钱包，避免页面一直停在加载中
+    const timer = setTimeout(() => {
+      if (alive) setData((d) => d || { coins: 0, logs: [], sent: [], received: [] });
+    }, 12000);
+    api.getCoins()
+      .then((d) => { if (alive) setData(d); })
+      .catch(() => { if (alive) setData({ coins: 0, logs: [], sent: [], received: [] }); })
+      .finally(() => clearTimeout(timer));
+    return () => { alive = false; clearTimeout(timer); };
   }, []);
 
   if (!data) return <div className="page"><div className="container"><div className="loading">加载中...</div></div></div>;
