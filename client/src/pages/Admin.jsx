@@ -136,6 +136,20 @@ export default function Admin() {
 
   const logout = () => { api.adminLogout(); setLoggedIn(false); setPassword(''); setRole(''); setTab('posts'); };
 
+  useEffect(() => {
+    if (loggedIn) api.getAdminCategories().then(setCategories).catch(() => {});
+  }, [loggedIn]);
+
+  // 审核时由管理员设置帖子板块
+  const changePostCategory = async (post, category) => {
+    if (!category || category === post.category) return;
+    try {
+      await api.setPostCategory(post.id, category);
+      setDetail((d) => d ? { ...d, post: { ...d.post, category } } : d);
+      setPosts((prev) => prev.map((p) => p.id === post.id ? { ...p, category } : p));
+    } catch (e) { alert(e.message); }
+  };
+
   const updateStatus = async (id, status) => {
     const input = status === 'rejected'
       ? prompt('请填写驳回理由（用户会在通知与「我的帖子」中看到）', '')
@@ -442,6 +456,18 @@ export default function Admin() {
       await api.updateCategory(c.id, { name: name.trim(), icon: icon.trim() || '📝' });
       await load();
     } catch (err) { alert(err.message); }
+  };
+
+  const moveCategory = async (c, dir) => {
+    const idx = categories.findIndex((x) => x.id === c.id);
+    const swapIdx = idx + dir;
+    if (idx < 0 || swapIdx < 0 || swapIdx >= categories.length) return;
+    const next = [...categories];
+    [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
+    try {
+      await Promise.all(next.map((cat, i) => api.updateCategory(cat.id, { sort_order: (i + 1) * 10 })));
+      setCategories(await api.getAdminCategories());
+    } catch (e) { alert(e.message); }
   };
 
   const removeCategory = async (c) => {
@@ -930,6 +956,8 @@ export default function Admin() {
                   <span className="post-time">排序 {c.sort_order} · {c.post_count} 篇帖子</span>
                 </div>
                 <div className="admin-actions">
+                  <button className="btn-secondary" disabled={categories.findIndex((x) => x.id === c.id) === 0} onClick={() => moveCategory(c, -1)}>↑ 上移</button>
+                  <button className="btn-secondary" disabled={categories.findIndex((x) => x.id === c.id) === categories.length - 1} onClick={() => moveCategory(c, 1)}>↓ 下移</button>
                   <button className="btn-secondary" onClick={() => renameCategory(c)}>重命名 / 改图标</button>
                   <button className="btn-danger" onClick={() => removeCategory(c)}>删除板块</button>
                 </div>
@@ -1182,7 +1210,14 @@ export default function Admin() {
             <div className="admin-detail-section">
               <h4>帖子信息</h4>
               <div className="admin-detail-grid">
-                <div className="admin-detail-item"><span className="admin-detail-label">分类</span><span>{detail.post.category}</span></div>
+                <div className="admin-detail-item">
+                  <span className="admin-detail-label">分类</span>
+                  <select className="form-input" style={{ padding: '3px 6px', fontSize: 13 }} value={detail.post.category}
+                    onChange={(e) => changePostCategory(detail.post, e.target.value)}>
+                    {categories.map((c) => <option key={c.id} value={c.name}>{c.icon} {c.name}</option>)}
+                    {!categories.some((c) => c.name === detail.post.category) && <option value={detail.post.category}>{detail.post.category}</option>}
+                  </select>
+                </div>
                 <div className="admin-detail-item"><span className="admin-detail-label">状态</span><span>{detail.post.status}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">热门帖</span><span>{detail.post.is_hot ? '🔥 是' : '否'}</span></div>
                 <div className="admin-detail-item"><span className="admin-detail-label">置顶帖</span><span>{detail.post.is_pinned ? '📌 是' : '否'}</span></div>

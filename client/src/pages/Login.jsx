@@ -78,7 +78,7 @@ export default function Login() {
           </div>
           <form onSubmit={submit}>
             <div className="form-group">
-              <input className="form-input" placeholder="用户名" value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
+              <input className="form-input" placeholder={mode === 'login' ? '用户名或用户 ID' : '用户名'} value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
             </div>
             {mode === 'register' && (
               <div className="form-group">

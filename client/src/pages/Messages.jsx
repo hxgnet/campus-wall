@@ -4,7 +4,6 @@ import { api } from '../api.js';
 import { useAuth } from '../AuthContext.jsx';
 import MediaView from '../components/MediaView.jsx';
 import StickerPicker from '../components/StickerPicker.jsx';
-import RecordButton from '../components/RecordButton.jsx';
 
 export default function Messages() {
   const { uid } = useParams();
@@ -112,7 +111,7 @@ export default function Messages() {
     <div className="page">
       <div className="container">
         <div className="chat-top-links">
-          <button className="back-btn" onClick={() => navigate(-1)}>← 返回</button>
+          <button className="back-btn" onClick={() => navigate('/notifications')}>← 返回通知</button>
           <button className="btn-text" onClick={() => navigate('/messages')}>💬 私信中心</button>
         </div>
         <div className="chat-header">
@@ -168,12 +167,11 @@ export default function Messages() {
             disabled={blocked}
           />
           <button type="button" className="media-btn" onClick={() => setShowSticker(!showSticker)} title="表情包" disabled={blocked}>🧩</button>
-          <label className="media-btn" title="图片 / 视频 / 语音">
+          <label className="media-btn" title="图片 / 视频">
             🖼️
-            <input type="file" accept="image/*,video/*,audio/*" multiple hidden disabled={blocked}
+            <input type="file" accept="image/*,video/*" multiple hidden disabled={blocked}
               onChange={(e) => { uploadFiles(e.target.files); e.target.value = ''; }} />
           </label>
-          <RecordButton onRecorded={(f) => uploadFiles([f])} disabled={blocked || uploading} />
           <button className="btn btn-primary" type="submit" disabled={blocked || uploading || (!input.trim() && pending.length === 0)}>
             {uploading ? '上传中...' : '发送'}
           </button>

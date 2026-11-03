@@ -100,20 +100,19 @@ const upload = multer({
   },
 });
 
-// 帖子 / 私信 / 评论 / 表情包：支持图片、视频、语音（最多 9 个文件，单个 40MB）
+// 帖子 / 私信 / 评论 / 表情包：仅支持图片、视频（最多 9 个文件，单个 40MB）
 const mediaUpload = multer({
   storage,
   limits: { fileSize: 40 * 1024 * 1024, files: 9 },
   fileFilter: (req, file, cb) => {
-    if (/^(image|video|audio)\//.test(file.mimetype)) cb(null, true);
-    else cb(new Error('只允许上传图片、视频或音频文件'));
+    if (/^(image|video)\//.test(file.mimetype)) cb(null, true);
+    else cb(new Error('平台已关闭语音发送，只允许上传图片或视频'));
   },
 });
 
 function mediaKind(mimetype) {
   if (/^image\//.test(mimetype)) return 'image';
   if (/^video\//.test(mimetype)) return 'video';
-  if (/^audio\//.test(mimetype)) return 'audio';
   return 'file';
 }
 
@@ -123,7 +122,7 @@ function parseMedia(value) {
     const arr = typeof value === 'string' ? JSON.parse(value) : value;
     if (!Array.isArray(arr)) return [];
     return arr
-      .filter((m) => m && m.url && /^(image|video|audio)$/.test(m.type || ''))
+      .filter((m) => m && m.url && /^(image|video)$/.test(m.type || ''))
       .map((m) => ({ type: m.type, url: String(m.url) }));
   } catch {
     return [];
@@ -356,11 +355,12 @@ app.post('/api/auth/register', async (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: '用户名和密码不能为空' });
-  const user = await db.prepare(`SELECT * FROM users WHERE username = ?`).get(username);
+  const { username, password } = req.body || {};
+  const reqUsername = String(username || '').trim();
+  if (!reqUsername || !password) return res.status(400).json({ error: '用户名/ID和密码不能为空' });
+  const user = await db.prepare(`SELECT * FROM users WHERE username = ? OR uid = ?`).get(reqUsername, reqUsername);
   if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-    return res.status(400).json({ error: '用户名或密码错误' });
+    return res.status(400).json({ error: '用户名/ID或密码错误' });
   }
   if (user.banned) {
     return res.status(403).json({ error: '账号已被封禁' });
@@ -663,15 +663,15 @@ app.get('/api/posts/:id', async (req, res) => {
 });
 
 app.post('/api/posts', auth, mediaUpload.fields([{ name: 'images', maxCount: 9 }, { name: 'media', maxCount: 9 }]), async (req, res) => {
-  const { category, content, tags, anonymous, quotePostId, activitySignupRequired, activitySignupDeadline } = req.body;
-  if (!category) return res.status(400).json({ error: '请选择板块' });
+  const { content, tags, anonymous, quotePostId } = req.body;
   if (!content?.trim() && !(req.files && Object.values(req.files).flat().length) && !(req.body.mediaUrls || req.body.media)) {
     return res.status(400).json({ error: '内容和媒体不能都为空' });
   }
   if (content && content.length > 3000) return res.status(400).json({ error: '内容不能超过3000字' });
-  // 板块必须存在（超级管理员可以删除板块）
-  const cat = await db.prepare(`SELECT name, is_activity FROM categories WHERE name = ?`).get(category);
-  if (!cat) return res.status(400).json({ error: '该板块不存在或已被删除' });
+  // 用户不选择板块，统一进入待分类，由管理员审核时设置
+  const cat = await db.prepare(`SELECT name, is_activity FROM categories WHERE name = '其他'`).get()
+    || await db.prepare(`SELECT name, is_activity FROM categories ORDER BY sort_order, id LIMIT 1`).get();
+  if (!cat) return res.status(400).json({ error: '暂无可用板块，请联系管理员' });
   // 敏感词检测
   if (content && containsSensitive(content)) {
     return res.status(400).json({ error: '内容包含违规词汇，请修改后再发布' });
@@ -707,8 +707,7 @@ app.post('/api/posts', auth, mediaUpload.fields([{ name: 'images', maxCount: 9 }
     if (!q) return res.status(400).json({ error: '引用的帖子不存在' });
     quoteId = q.id;
   }
-  const isActivity = !!cat.is_activity;
-  const signupRequired = isActivity && ['true', '1', 'on'].includes(String(activitySignupRequired).toLowerCase());
+  const signupRequired = false;
 
   // 管理员 / 超级管理员发帖直接过审并标记身份
   const isStaff = req.user.role === 'admin' || req.user.role === 'super';
@@ -722,9 +721,9 @@ app.post('/api/posts', auth, mediaUpload.fields([{ name: 'images', maxCount: 9 }
        is_anonymous, client_ip, user_agent, status, is_staff, staff_role)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
   ).run(
-    req.user.dbId, category, (content || '').trim(), JSON.stringify(tagArr), postNickname,
+    req.user.dbId, cat.name, (content || '').trim(), JSON.stringify(tagArr), postNickname,
     JSON.stringify(images), JSON.stringify(mediaList), quoteId,
-    signupRequired, activitySignupDeadline || null,
+    signupRequired, null,
     isAnonymous, clientIp, userAgent, status, isStaff, staffRole
   );
 
@@ -1168,6 +1167,13 @@ app.put('/api/admin/posts/:id', adminAuth, async (req, res) => {
   if (!target) return res.status(404).json({ error: '帖子不存在' });
   const sets = [];
   const params = [];
+  if (req.body.category !== undefined) {
+    const category = String(req.body.category || '').trim();
+    const cat = await db.prepare(`SELECT id FROM categories WHERE name = ?`).get(category);
+    if (!cat) return res.status(400).json({ error: '板块不存在' });
+    sets.push('category = ?');
+    params.push(category);
+  }
   if (status !== undefined) {
     if (!['approved', 'rejected', 'pending'].includes(status)) return res.status(400).json({ error: '无效状态' });
     sets.push('status = ?');

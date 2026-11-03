@@ -221,6 +221,8 @@ export const api = {
   getPostAdmin: (id) => request(`/admin/posts/${id}`, { headers: adminHeaders() }),
   updatePostStatus: (id, status, note = '') =>
     request(`/admin/posts/${id}`, { method: 'PUT', body: JSON.stringify({ status, note }), headers: adminHeaders() }),
+  setPostCategory: (id, category) =>
+    request(`/admin/posts/${id}`, { method: 'PUT', body: JSON.stringify({ category }), headers: adminHeaders() }),
   setPostHot: (id, isHot) =>
     request(`/admin/posts/${id}`, { method: 'PUT', body: JSON.stringify({ is_hot: isHot }), headers: adminHeaders() }),
   setPostPin: (id, isPinned) =>

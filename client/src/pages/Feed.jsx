@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { QRCodeSVG } from 'qrcode.react';
 import { api, CATEGORIES } from '../api.js';
 import PostCard from '../components/PostCard.jsx';
 import PinnedCarousel from '../components/PinnedCarousel.jsx';
@@ -15,6 +16,8 @@ export default function Feed() {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [sort, setSort] = useState('new');
+  const [showQR, setShowQR] = useState(false);
+  const homeUrl = (typeof window !== 'undefined' ? window.location.origin : 'https://psxyq.pages.dev') + '/';
 
   const loadPosts = async (reset = false) => {
     if (reset) { setPosts([]); setPage(1); setHasMore(true); }
@@ -58,6 +61,7 @@ export default function Feed() {
         <div className="top-search-wrap">
           <div className="search-bar search-trigger" onClick={() => navigate('/search')}>
             <input placeholder="搜索帖子内容、标签或同学..." readOnly />
+            <button type="button" className="btn btn-secondary" onClick={(e) => { e.stopPropagation(); setShowQR(true); }} title="分享主页二维码">🔗</button>
             <button type="button" className="btn btn-primary">🔍</button>
           </div>
         </div>
@@ -120,6 +124,23 @@ export default function Feed() {
           )}
         </div>
       </div>
+
+      {showQR && (
+        <div className="modal-overlay" onClick={() => setShowQR(false)}>
+          <div className="modal-box qr-card" onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginBottom: 6 }}>分享鹏山校园墙</h3>
+            <p className="anon-hint" style={{ marginBottom: 14 }}>扫码直接进入主页</p>
+            <div className="qr-code-wrap"><QRCodeSVG value={homeUrl} size={190} level="M" /></div>
+            <p style={{ fontSize: 12, color: 'var(--text-light)', margin: '10px 0 14px', wordBreak: 'break-all' }}>{homeUrl}</p>
+            <button className="btn btn-primary btn-block" onClick={async () => {
+              try {
+                if (navigator.share) await navigator.share({ title: '鹏山校园墙', url: homeUrl });
+                else { await navigator.clipboard.writeText(homeUrl); alert('主页链接已复制'); }
+              } catch {}
+            }}>分享主页链接</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

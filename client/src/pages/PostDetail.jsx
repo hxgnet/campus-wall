@@ -4,7 +4,6 @@ import { api, EMOJIS } from '../api.js';
 import { useAuth } from '../AuthContext.jsx';
 import MediaView from '../components/MediaView.jsx';
 import StickerPicker from '../components/StickerPicker.jsx';
-import RecordButton from '../components/RecordButton.jsx';
 import ForwardModal from '../components/ForwardModal.jsx';
 
 function Composer({ placeholder, onSubmit, autoFocus = false, compact = false }) {
@@ -61,11 +60,10 @@ function Composer({ placeholder, onSubmit, autoFocus = false, compact = false })
         />
         <button type="button" className="media-btn" onClick={() => setShowEmoji(!showEmoji)} title="表情">😊</button>
         <button type="button" className="media-btn" onClick={() => setShowSticker(!showSticker)} title="表情包">🧩</button>
-        <label className="media-btn" title="图片/视频/语音">
+        <label className="media-btn" title="图片/视频">
           🖼️
-          <input type="file" accept="image/*,video/*,audio/*" multiple hidden onChange={(e) => { uploadFiles(e.target.files); e.target.value = ''; }} />
+          <input type="file" accept="image/*,video/*" multiple hidden onChange={(e) => { uploadFiles(e.target.files); e.target.value = ''; }} />
         </label>
-        <RecordButton onRecorded={(f) => uploadFiles([f])} disabled={busy} />
         <button className="btn btn-primary" type="submit" disabled={busy || (!text.trim() && media.length === 0)}>
           {busy ? '...' : '发送'}
         </button>
