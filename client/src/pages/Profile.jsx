@@ -20,7 +20,7 @@ const STATUS_TEXT = { approved: '已通过', pending: '审核中', rejected: '�
 export default function Profile() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { user, updateUser } = useAuth();
+  const { user, updateUser, logout } = useAuth();
   const [profile, setProfile] = useState(null);
   const [posts, setPosts] = useState([]);
   const [isMe, setIsMe] = useState(false);
@@ -50,6 +50,9 @@ export default function Profile() {
   const [deletionNote, setDeletionNote] = useState('');
   const [deletionRequests, setDeletionRequests] = useState([]);
   const [submitBusy, setSubmitBusy] = useState(false);
+  const [followed, setFollowed] = useState(false);
+  const [followStats, setFollowStats] = useState({ followers: [], following: [] });
+  const [followModal, setFollowModal] = useState(null);
 
   const loadRequests = () => api.getMyDeletionRequests().then(setDeletionRequests).catch(() => {});
 
@@ -60,7 +63,9 @@ export default function Profile() {
       setBio(u.bio || '');
       setIsMe(user && user.uid === id);
       setBlocked(!!u.blocked_by_me);
+      setFollowed(!!u.is_following);
     }).catch(() => {});
+    api.getUserFollows(id).then(setFollowStats).catch(() => {});
     if (user && user.uid === id) {
       api.getMyPosts().then(setPosts).catch(() => {});
     } else {
@@ -142,6 +147,17 @@ export default function Profile() {
     try {
       const r = await api.requestFriend(id);
       setFriendStatus(r.status === 'accepted' ? 'friend' : 'requested');
+    } catch (e) { alert(e.message); }
+  };
+
+  const toggleFollow = async () => {
+    if (!user) { navigate('/login'); return; }
+    try {
+      const r = await api.followUser(id);
+      setFollowed(r.followed);
+      const stats = await api.getUserFollows(id);
+      setFollowStats(stats);
+      setProfile((p) => ({ ...p, follower_count: stats.followers.length, following_count: stats.following.length }));
     } catch (e) { alert(e.message); }
   };
 
@@ -276,8 +292,10 @@ export default function Profile() {
                   ID：{profile.uid} <span style={{ fontSize: 11, color: 'var(--primary)' }}>📋 点击复制</span>
                 </p>
               )}
-              <p style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 8 }}>
+              <p className="profile-stats" style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 8 }}>
                 帖子 {posts.length}
+                <button type="button" className="stat-link" onClick={() => setFollowModal('following')}>关注 {followStats.following.length}</button>
+                <button type="button" className="stat-link" onClick={() => setFollowModal('followers')}>粉丝 {followStats.followers.length}</button>
                 {profile.reputation !== undefined && <> · 信誉分 {profile.reputation}</>}
                 {isMe && coins != null && <> · 🪙 {coins} 鹏币</>}
                 {' '}· 加入于 {profile.created_at?.slice(0, 10)}
@@ -285,6 +303,9 @@ export default function Profile() {
               {isMe && <button className="btn btn-secondary" style={{ marginTop: 12 }} onClick={() => setEditing(true)}>编辑资料</button>}
               {!isMe && user && (
                 <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 12, flexWrap: 'wrap' }}>
+                  <button className={followed ? 'btn btn-secondary' : 'btn btn-primary'} onClick={toggleFollow}>
+                    {followed ? '已关注（点击取消）' : '关注'}
+                  </button>
                   {friendStatus === 'friend' ? (
                     <button className="btn btn-secondary" disabled>已是好友</button>
                   ) : friendStatus === 'requested' ? (
@@ -327,6 +348,21 @@ export default function Profile() {
                 </>
               ) : <p className="anon-hint">该用户未公开资料</p>;
             })()}
+          </div>
+        )}
+
+        {isMe && (
+          <div className="detail-card" style={{ marginBottom: 16 }}>
+            <h3 style={{ fontSize: 15, marginBottom: 10 }}>我的功能</h3>
+            <div className="profile-quick-links">
+              <button className="btn btn-secondary" onClick={() => navigate('/notifications')}>🔔 通知</button>
+              <button className="btn btn-secondary" onClick={() => navigate('/favorites')}>⭐ 收藏</button>
+              <button className="btn btn-secondary" onClick={() => navigate('/apply')}>📨 申请</button>
+              {(user.role === 'admin' || user.role === 'super') && (
+                <button className="btn btn-secondary" onClick={() => navigate('/admin')}>🛡️ 管理</button>
+              )}
+              <button className="btn btn-secondary" onClick={() => { logout(); navigate('/'); }}>退出登录</button>
+            </div>
           </div>
         )}
 
@@ -385,6 +421,27 @@ export default function Profile() {
       </div>
 
       {forwarding && <ForwardModal share={{ type: 'profile', id: profile.uid }} onClose={() => setForwarding(false)} />}
+
+      {followModal && (
+        <div className="modal-overlay" onClick={() => setFollowModal(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-title">{followModal === 'followers' ? '粉丝' : '关注'}</div>
+            <div className="follow-list">
+              {(followModal === 'followers' ? followStats.followers : followStats.following).map((u) => (
+                <button key={u.uid} type="button" className="follow-item"
+                  onClick={() => { setFollowModal(null); navigate(`/profile/${u.uid}`); }}>
+                  <span className="follow-avatar">{u.avatar ? <img src={u.avatar} alt="" /> : (u.nickname || '?')[0]}</span>
+                  <span className="follow-name">{u.nickname}<small>@{u.username}</small></span>
+                  {u.custom_tag && <span style={{ color: u.tag_color || 'var(--primary)', fontSize: 12 }}>{u.custom_tag}</span>}
+                </button>
+              ))}
+              {(followModal === 'followers' ? followStats.followers : followStats.following).length === 0 && (
+                <div className="muted" style={{ textAlign: 'center', padding: 16 }}>暂无</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {showTransfer && (
         <div className="modal-overlay" onClick={() => setShowTransfer(false)}>

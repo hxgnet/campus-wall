@@ -51,6 +51,7 @@ export const api = {
   updateProfile: (data) =>
     request('/auth/profile', { method: 'PUT', body: JSON.stringify(data) }),
   getUser: (id) => request(`/users/${id}`),
+  getUserFollows: (id) => request(`/users/${id}/follows`),
   searchUsers: (q) => request(`/users/search?q=${encodeURIComponent(q)}`),
   followUser: (id) => request(`/users/${id}/follow`, { method: 'POST' }),
 
@@ -237,17 +238,17 @@ export const api = {
     request(`/admin/reports/${id}`, { method: 'PUT', body: JSON.stringify({ status, note }), headers: adminHeaders() }),
   getUsers: () => request('/admin/users', { headers: adminHeaders() }),
   getUserDetail: (uid) => request(`/admin/users/${uid}/detail`, { headers: adminHeaders() }),
-  restoreReputation: (uid, reputation = 100) =>
-    request(`/admin/users/${uid}/reputation`, { method: 'POST', body: JSON.stringify({ reputation }), headers: adminHeaders() }),
-  updateUserRole: (id, role) =>
-    request(`/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ role }), headers: adminHeaders() }),
-  deleteUser: (id) =>
-    request(`/admin/users/${id}`, { method: 'DELETE', headers: adminHeaders() }),
+  restoreReputation: (uid, reputation = 100, reason = '') =>
+    request(`/admin/users/${uid}/reputation`, { method: 'POST', body: JSON.stringify({ reputation, reason }), headers: adminHeaders() }),
+  updateUserRole: (id, role, reason = '') =>
+    request(`/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ role, reason }), headers: adminHeaders() }),
+  deleteUser: (id, reason = '') =>
+    request(`/admin/users/${id}`, { method: 'DELETE', body: JSON.stringify({ reason }), headers: adminHeaders() }),
   adminBans: () => request('/admin/bans', { headers: adminHeaders() }),
   adminBanUser: (uid, reason) =>
     request(`/admin/users/${uid}/ban`, { method: 'POST', body: JSON.stringify({ reason }), headers: adminHeaders() }),
-  adminUnbanUser: (uid) =>
-    request(`/admin/users/${uid}/unban`, { method: 'POST', headers: adminHeaders() }),
+  adminUnbanUser: (uid, reason = '') =>
+    request(`/admin/users/${uid}/unban`, { method: 'POST', body: JSON.stringify({ reason }), headers: adminHeaders() }),
   adminAlerts: () => request('/admin/alerts', { headers: adminHeaders() }),
   adminReadAlerts: () => request('/admin/alerts/read', { method: 'POST', headers: adminHeaders() }),
   adminConversations: (uid) => request(`/admin/conversations/${uid}`, { headers: adminHeaders() }),
@@ -276,10 +277,10 @@ export const api = {
   updateDeletionRequest: (id, status, admin_note = '') =>
     request(`/admin/deletion-requests/${id}`, { method: 'PUT', body: JSON.stringify({ status, admin_note }), headers: adminHeaders() }),
   getPostAnalytics: (id) => request(`/admin/posts/${id}/analytics`, { headers: adminHeaders() }),
-  updateUsername: (uid, username) =>
-    request(`/admin/users/${uid}/username`, { method: 'PUT', body: JSON.stringify({ username }), headers: adminHeaders() }),
-  updateUserTags: (uid, custom_tag, tag_color) =>
-    request(`/admin/users/${uid}/tags`, { method: 'PUT', body: JSON.stringify({ custom_tag, tag_color }), headers: adminHeaders() }),
+  updateUsername: (uid, username, reason = '') =>
+    request(`/admin/users/${uid}/username`, { method: 'PUT', body: JSON.stringify({ username, reason }), headers: adminHeaders() }),
+  updateUserTags: (uid, custom_tag, tag_color, reason = '') =>
+    request(`/admin/users/${uid}/tags`, { method: 'PUT', body: JSON.stringify({ custom_tag, tag_color, reason }), headers: adminHeaders() }),
 };
 
 function adminHeaders() {

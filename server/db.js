@@ -769,15 +769,30 @@ async function seedExtras() {
     await pool.query(`DELETE FROM categories WHERE name = ANY($1)`, [names]);
   }
 
-  // 全体成员群聊
-  const { rows: groups } = await pool.query(`SELECT id FROM chat_groups WHERE is_all = TRUE ORDER BY id LIMIT 1`);
-  let groupId = groups[0]?.id;
+  // 全体成员群聊：合并历史上重复创建的群，只保留最早的一个
+  const { rows: allGroups } = await pool.query(
+    `SELECT id FROM chat_groups WHERE is_all = TRUE OR name = $1 ORDER BY id`,
+    [ALL_GROUP_NAME]
+  );
+  let groupId = allGroups[0]?.id;
   if (!groupId) {
     const r = await pool.query(
       `INSERT INTO chat_groups (name, owner_uid, is_all) VALUES ($1, 'system', TRUE) RETURNING id`,
       [ALL_GROUP_NAME]
     );
     groupId = r.rows[0].id;
+  } else {
+    await pool.query(`UPDATE chat_groups SET is_all = TRUE, name = $1 WHERE id = $2`, [ALL_GROUP_NAME, groupId]);
+    for (const g of allGroups.slice(1)) {
+      await pool.query(`UPDATE group_messages SET group_id = $1 WHERE group_id = $2`, [groupId, g.id]);
+      await pool.query(
+        `INSERT INTO chat_group_members (group_id, user_uid, role)
+         SELECT $1, user_uid, role FROM chat_group_members WHERE group_id = $2
+         ON CONFLICT (group_id, user_uid) DO NOTHING`,
+        [groupId, g.id]
+      );
+      await pool.query(`DELETE FROM chat_groups WHERE id = $1`, [g.id]);
+    }
   }
   await pool.query(
     `INSERT INTO chat_group_members (group_id, user_uid, role)

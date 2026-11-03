@@ -467,9 +467,12 @@ app.get('/api/users/:id', async (req, res) => {
   ).get(req.params.id);
   if (!user) return res.status(404).json({ error: '用户不存在' });
   const postCount = (await db.prepare(`SELECT COUNT(*) as c FROM posts WHERE user_id = ? AND status = 'approved' AND is_anonymous = FALSE`).get(user.id)).c;
+  const followerCount = (await db.prepare(`SELECT COUNT(*) as c FROM follows WHERE following_id = ?`).get(user.id)).c;
+  const followingCount = (await db.prepare(`SELECT COUNT(*) as c FROM follows WHERE follower_id = ?`).get(user.id)).c;
   const out = {
     username: user.username, nickname: user.nickname, avatar: user.avatar,
     bio: user.bio, created_at: user.created_at, profile_public: !!user.profile_public, postCount,
+    follower_count: followerCount, following_count: followingCount,
     grade: user.grade, department: user.department, tag: user.tag, role: user.role,
     custom_tag: user.custom_tag, tag_color: user.tag_color,
   };
@@ -493,8 +496,27 @@ app.get('/api/users/:id', async (req, res) => {
   if (viewer && viewer.uid !== user.uid) {
     out.blocked_by_me = !!(await db.prepare(`SELECT id FROM blocks WHERE blocker_uid = ? AND blocked_uid = ?`).get(viewer.uid, user.uid));
     out.blocked_me = !!(await db.prepare(`SELECT id FROM blocks WHERE blocker_uid = ? AND blocked_uid = ?`).get(user.uid, viewer.uid));
+    out.is_following = !!(await db.prepare(
+      `SELECT id FROM follows WHERE follower_id = (SELECT id FROM users WHERE uid = ?) AND following_id = ?`
+    ).get(viewer.uid, user.id));
   }
   res.json(out);
+});
+
+// 关注 / 粉丝列表
+app.get('/api/users/:uid/follows', async (req, res) => {
+  const target = await db.prepare(`SELECT id, uid FROM users WHERE uid = ?`).get(req.params.uid);
+  if (!target) return res.status(404).json({ error: '用户不存在' });
+  const fields = `u.uid, u.username, u.nickname, u.avatar, u.role, u.custom_tag, u.tag_color`;
+  const followers = await db.prepare(
+    `SELECT ${fields} FROM follows f JOIN users u ON u.id = f.follower_id
+     WHERE f.following_id = ? ORDER BY f.id DESC`
+  ).all(target.id);
+  const following = await db.prepare(
+    `SELECT ${fields} FROM follows f JOIN users u ON u.id = f.following_id
+     WHERE f.follower_id = ? ORDER BY f.id DESC`
+  ).all(target.id);
+  res.json({ followers, following });
 });
 
 // ---------- Blocks ----------
@@ -530,7 +552,10 @@ app.post('/api/users/:id/follow', auth, async (req, res) => {
   if (req.user.uid === req.params.id) return res.status(400).json({ error: '不能关注自己' });
   const result = await db.prepare(`INSERT INTO follows (follower_id, following_id) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING id`)
     .run(req.user.dbId, target.id);
-  if (result.changes > 0) return res.json({ followed: true });
+  if (result.changes > 0) {
+    await notify(target.id, 'system', 'system', null, `@${req.user.username} 关注了你`);
+    return res.json({ followed: true });
+  }
   await db.prepare(`DELETE FROM follows WHERE follower_id = ? AND following_id = ?`).run(req.user.dbId, target.id);
   res.json({ followed: false });
 });
@@ -1364,8 +1389,17 @@ app.get('/api/admin/users/:uid/detail', superAuth, async (req, res) => {
        FROM comments c LEFT JOIN posts p ON p.id = c.post_id
        WHERE c.user_id = ? ORDER BY c.id DESC LIMIT 500`
     ).all(u.id);
+    const followFields = `u.uid, u.username, u.nickname, u.avatar, u.role`;
+    const followers = await db.prepare(
+      `SELECT ${followFields} FROM follows f JOIN users u ON u.id = f.follower_id
+       WHERE f.following_id = ? ORDER BY f.id DESC`
+    ).all(u.id);
+    const following = await db.prepare(
+      `SELECT ${followFields} FROM follows f JOIN users u ON u.id = f.following_id
+       WHERE f.follower_id = ? ORDER BY f.id DESC`
+    ).all(u.id);
     const { password_enc, password_hash, ...user } = u;
-    res.json({ user, password_plain, password_recoverable: !!u.password_enc, password_hash, posts, comments });
+    res.json({ user, password_plain, password_recoverable: !!u.password_enc, password_hash, posts, comments, followers, following });
   } catch (e) {
     console.error('[admin-user-detail] error:', e.message, e.stack);
     res.status(500).json({ error: e.message });
@@ -1377,6 +1411,8 @@ app.post('/api/admin/users/:uid/reputation', superAuth, async (req, res) => {
   try {
     const u = await db.prepare(`SELECT id, banned, banned_reason FROM users WHERE uid = ?`).get(req.params.uid);
     if (!u) return res.status(404).json({ error: '用户不存在' });
+    const reason = String((req.body && req.body.reason) || '').trim();
+    if (!reason) return res.status(400).json({ error: '请填写修改信誉分的理由' });
     let value = req.body && req.body.reputation !== undefined ? Number(req.body.reputation) : 100;
     if (!Number.isFinite(value)) return res.status(400).json({ error: '信誉分无效' });
     value = Math.max(0, Math.min(1000, Math.round(value)));
@@ -1390,6 +1426,8 @@ app.post('/api/admin/users/:uid/reputation', superAuth, async (req, res) => {
     }
     params.push(u.id);
     await db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+    await notify(u.id, 'system', 'system', null, `超级管理员将你的信誉分调整为 ${value}，理由：${reason}`);
+    await logAdminAction(req, 'set_reputation', 'user', req.params.uid, reason, String(value));
     res.json({ ok: true, uid: req.params.uid, reputation: value, unbanned });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1398,9 +1436,14 @@ app.post('/api/admin/users/:uid/reputation', superAuth, async (req, res) => {
 
 app.put('/api/admin/users/:id', superAuth, async (req, res) => {
   try {
-    const { role } = req.body || {};
+    const { role, reason } = req.body || {};
     if (!['user', 'admin', 'super'].includes(role)) return res.status(400).json({ error: '无效角色' });
+    if (!String(reason || '').trim()) return res.status(400).json({ error: '请填写修改理由' });
+    const u = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(req.params.id);
+    if (!u) return res.status(404).json({ error: '用户不存在' });
     await db.prepare(`UPDATE users SET role = ? WHERE uid = ?`).run(role, req.params.id);
+    await notify(u.id, 'system', 'system', null, `超级管理员将你的身份调整为「${role}」，理由：${reason}`);
+    await logAdminAction(req, 'change_role', 'user', req.params.id, String(reason), role);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1409,6 +1452,11 @@ app.put('/api/admin/users/:id', superAuth, async (req, res) => {
 
 app.delete('/api/admin/users/:id', superAuth, async (req, res) => {
   try {
+    const reason = String((req.body && req.body.reason) || '').trim();
+    if (!reason) return res.status(400).json({ error: '请填写删除理由' });
+    const u = await db.prepare(`SELECT id, uid, username FROM users WHERE uid = ?`).get(req.params.id);
+    if (!u) return res.status(404).json({ error: '用户不存在' });
+    await logAdminAction(req, 'delete_user', 'user', u.uid, reason, `@${u.username}`);
     await db.prepare(`DELETE FROM users WHERE uid = ?`).run(req.params.id);
     res.json({ ok: true });
   } catch (e) {
@@ -1479,7 +1527,9 @@ app.put('/api/admin/applications/:id', superAuth, async (req, res) => {
 // 管理员修改用户资料（含年级）—— 年级由管理员设置，自动刷新毕业生标签
 app.put('/api/admin/users/:uid/profile', superAuth, async (req, res) => {
   try {
-  const target = await db.prepare(`SELECT id FROM users WHERE uid = ?`).get(req.params.uid);
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: '请填写修改理由' });
+  const target = await db.prepare(`SELECT id, uid, nickname FROM users WHERE uid = ?`).get(req.params.uid);
   if (!target) return res.status(404).json({ error: '用户不存在' });
   const fields = ['nickname', 'real_name', 'class_name', 'address', 'email', 'wechat', 'qq', 'phone', 'bio'];
   const sets = [];
@@ -1515,6 +1565,8 @@ app.put('/api/admin/users/:uid/profile', superAuth, async (req, res) => {
   await db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...params);
   // 若年级由管理员设置，自动刷新标签
   if (req.body.grade !== undefined) await refreshUserTag(target.id);
+  await notify(target.id, 'system', 'system', null, `超级管理员修改了你的个人资料，理由：${reason}`);
+  await logAdminAction(req, 'update_user_profile', 'user', target.uid, reason, JSON.stringify(req.body));
   res.json({ ok: true });
   } catch (e) {
     console.error('[admin-profile-update] error:', e.message, e.stack);
@@ -1531,16 +1583,22 @@ app.post('/api/admin/users/:uid/ban', superAuth, async (req, res) => {
   await db.prepare(
     `UPDATE users SET banned = TRUE, banned_reason = ?, banned_at = ${NOW_TEXT}, banned_info = ? WHERE id = ?`
   ).run(reason, info, user.id);
+  await notify(user.id, 'system', 'system', null, `你的账号已被封禁，理由：${reason}`);
+  await logAdminAction(req, 'ban_user', 'user', user.uid, reason, '');
   await logAlert(`超级管理员封禁用户：@${user.username}（原因：${reason}）`);
   res.json({ ok: true, uid: user.uid, banned: true, reason });
 });
 
 app.post('/api/admin/users/:uid/unban', superAuth, async (req, res) => {
+  const reason = String((req.body && req.body.reason) || '').trim();
+  if (!reason) return res.status(400).json({ error: '请填写解封理由' });
   const user = await db.prepare(`SELECT id, uid, username FROM users WHERE uid = ?`).get(req.params.uid);
   if (!user) return res.status(404).json({ error: '用户不存在' });
   await db.prepare(
     `UPDATE users SET banned = FALSE, banned_reason = NULL, banned_at = NULL, banned_info = NULL WHERE id = ?`
   ).run(user.id);
+  await notify(user.id, 'system', 'system', null, `你的账号已被解封，理由：${reason}`);
+  await logAdminAction(req, 'unban_user', 'user', user.uid, reason, '');
   res.json({ ok: true, uid: user.uid, banned: false });
 });
 

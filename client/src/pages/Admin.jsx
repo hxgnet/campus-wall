@@ -60,7 +60,7 @@ export default function Admin() {
   const [analytics, setAnalytics] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   // 超管改名 / 标签
-  const [userEdit, setUserEdit] = useState({ uid: null, username: '', custom_tag: '', tag_color: '' });
+  const [userEdit, setUserEdit] = useState({ uid: null, username: '', custom_tag: '', tag_color: '', reason: '' });
   // 超级通知
   const [notifyImage, setNotifyImage] = useState('');
   const [notifyBadge, setNotifyBadge] = useState('');
@@ -230,13 +230,23 @@ export default function Admin() {
   };
 
   const delUser = async (id) => {
+    const reason = prompt('删除该用户需要填写理由（不可恢复）');
+    if (reason === null) return;
+    if (!reason.trim()) { alert('必须填写删除理由'); return; }
     if (!confirm('确定删除该用户？此操作不可恢复。')) return;
-    try { await api.deleteUser(id); setUsers((prev) => prev.filter((u) => u.uid !== id)); }
+    try { await api.deleteUser(id, reason.trim()); setUsers((prev) => prev.filter((u) => u.uid !== id)); }
     catch (e) { alert(e.message); }
   };
 
   const setUserRole = async (id, role) => {
-    try { await api.updateUserRole(id, role); setUsers((prev) => prev.map((u) => u.uid === id ? { ...u, role } : u)); }
+    const input = prompt(`请输入将用户身份调整为「${role}」的理由`);
+    if (input === null) return;
+    const reason = input.trim();
+    if (!reason) { alert('必须填写理由'); return; }
+    try {
+      await api.updateUserRole(id, role, reason);
+      setUsers((prev) => prev.map((u) => u.uid === id ? { ...u, role } : u));
+    }
     catch (e) { alert(e.message); }
   };
 
@@ -251,9 +261,12 @@ export default function Admin() {
   };
 
   const unbanUser = async (uid) => {
-    if (!confirm('确定解除该用户的封禁？')) return;
+    const input = prompt('请输入解封理由');
+    if (input === null) return;
+    const reason = input.trim();
+    if (!reason) { alert('必须填写解封理由'); return; }
     try {
-      await api.adminUnbanUser(uid);
+      await api.adminUnbanUser(uid, reason);
       await load();
     } catch (e) { alert(e.message); }
   };
@@ -315,6 +328,16 @@ export default function Admin() {
         tag_color: d.user.tag_color || '#ff3b30',
         department: d.user.department || '',
         grade: d.user.grade != null ? String(d.user.grade) : '',
+        nickname: d.user.nickname || '',
+        real_name: d.user.real_name || '',
+        class_name: d.user.class_name || '',
+        address: d.user.address || '',
+        email: d.user.email || '',
+        wechat: d.user.wechat || '',
+        qq: d.user.qq || '',
+        phone: d.user.phone || '',
+        bio: d.user.bio || '',
+        editReason: '',
         coinAmount: '',
         coinReason: '',
       });
@@ -325,10 +348,13 @@ export default function Admin() {
   const restoreReputation = async (uid, current) => {
     const input = prompt('请输入要恢复的信誉分（满分 100）', '100');
     if (input === null) return;
+    const reason = prompt('请输入修改信誉分的理由');
+    if (reason === null) return;
+    if (!reason.trim()) { alert('必须填写理由'); return; }
     const value = Number(input);
     if (!Number.isFinite(value)) { alert('请输入有效数字'); return; }
     try {
-      const r = await api.restoreReputation(uid, value);
+      const r = await api.restoreReputation(uid, value, reason.trim());
       alert(`已恢复该用户信誉分为 ${r.reputation}${r.unbanned ? '，并已自动解封' : ''}`);
       await load();
       if (userDetail && userDetail.user.uid === uid) await openUserDetail(uid);
@@ -457,9 +483,12 @@ export default function Admin() {
   // ---------- 超管改名 / 标签 ----------
   const saveUsername = async () => {
     if (!userDetail) return;
+    const reason = prompt('请输入修改用户名的理由');
+    if (reason === null) return;
+    if (!reason.trim()) { alert('必须填写理由'); return; }
     if (!confirm('确定修改该用户的用户名？用户会收到系统通知。')) return;
     try {
-      const r = await api.updateUsername(userDetail.user.uid, userEdit.username.trim());
+      const r = await api.updateUsername(userDetail.user.uid, userEdit.username.trim(), reason.trim());
       setUserDetail((d) => ({ ...d, user: { ...d.user, username: r.username } }));
       alert('用户名已修改，用户已收到通知');
       await load();
@@ -468,11 +497,39 @@ export default function Admin() {
 
   const saveUserTags = async () => {
     if (!userDetail) return;
+    const reason = prompt('请输入修改标签的理由');
+    if (reason === null) return;
+    if (!reason.trim()) { alert('必须填写理由'); return; }
     try {
-      const r = await api.updateUserTags(userDetail.user.uid, userEdit.custom_tag, userEdit.tag_color);
+      const r = await api.updateUserTags(userDetail.user.uid, userEdit.custom_tag, userEdit.tag_color, reason.trim());
       setUserDetail((d) => ({ ...d, user: { ...d.user, custom_tag: r.custom_tag, tag_color: r.tag_color } }));
       await load();
       alert('标签已更新，用户已收到通知');
+    } catch (e) { alert(e.message); }
+  };
+
+  // 超管编辑用户个人资料（必须填写理由，用户会收到通知）
+  const saveAdminProfile = async () => {
+    if (!userDetail) return;
+    const reason = prompt('请输入修改该用户个人资料的理由');
+    if (reason === null) return;
+    if (!reason.trim()) { alert('必须填写理由'); return; }
+    try {
+      await api.adminUpdateUserProfile(userDetail.user.uid, {
+        nickname: userEdit.nickname,
+        real_name: userEdit.real_name,
+        class_name: userEdit.class_name,
+        address: userEdit.address,
+        email: userEdit.email,
+        wechat: userEdit.wechat,
+        qq: userEdit.qq,
+        phone: userEdit.phone,
+        bio: userEdit.bio,
+        reason: reason.trim(),
+      });
+      await openUserDetail(userDetail.user.uid);
+      await load();
+      alert('个人资料已保存，用户已收到通知');
     } catch (e) { alert(e.message); }
   };
 
@@ -481,10 +538,14 @@ export default function Admin() {
     if (!userDetail) return;
     if (!userEdit.department) { alert('请先选择学部'); return; }
     if (!userEdit.grade) { alert('请输入入学年份'); return; }
+    const reason = prompt('请填写确认学部与入学年份的理由');
+    if (reason === null) return;
+    if (!reason.trim()) { alert('必须填写理由'); return; }
     try {
       await api.adminUpdateUserProfile(userDetail.user.uid, {
         department: userEdit.department,
         grade: Number(userEdit.grade),
+        reason: reason.trim(),
       });
       await openUserDetail(userDetail.user.uid);
       await load();
@@ -523,9 +584,12 @@ export default function Admin() {
 
   const saveApplicantProfile = async () => {
     if (!editingApp) return;
+    const reason = prompt('请输入修改申请人资料的理由');
+    if (reason === null) return;
+    if (!reason.trim()) { alert('必须填写理由'); return; }
     setEditSaving(true);
     try {
-      const payload = { ...editForm };
+      const payload = { ...editForm, reason: reason.trim() };
       if (editGrade.trim() !== '') payload.grade = Number(editGrade);
       else payload.grade = null;
       if (editTag) payload.tag = editTag;
@@ -1353,6 +1417,58 @@ export default function Admin() {
               <p style={{ marginTop: 6, fontSize: 12, color: 'var(--text-light)' }}>
                 确认后系统按学部自动判定：小学部满 6 年、初中部满 3 年（过 9 月 1 日）授予「毕业生」。
               </p>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>超管编辑个人资料（保存后通知用户）</h4>
+              <div className="admin-detail-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                {[
+                  ['nickname', '昵称'],
+                  ['real_name', '真实姓名'],
+                  ['class_name', '班级'],
+                  ['phone', '手机号'],
+                  ['email', '邮箱'],
+                  ['wechat', '微信'],
+                  ['qq', 'QQ'],
+                  ['address', '住址'],
+                  ['bio', '个性签名'],
+                ].map(([key, label]) => (
+                  <div className="form-group" style={{ margin: '4px 0' }} key={key}>
+                    <label style={{ fontSize: 12, color: 'var(--text-light)' }}>{label}</label>
+                    <input className="form-input" style={{ fontSize: 13 }} value={userEdit[key] || ''}
+                      onChange={(e) => setUserEdit({ ...userEdit, [key]: e.target.value })} />
+                  </div>
+                ))}
+              </div>
+              <button className="btn btn-primary" style={{ marginTop: 6 }} onClick={saveAdminProfile}>保存个人信息并通知用户</button>
+            </div>
+
+            <div className="admin-detail-section">
+              <h4>关注 / 粉丝（超管可见）</h4>
+              <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 13, marginBottom: 8 }}>
+                <span>关注 {userDetail.following?.length || 0} 人</span>
+                <span>粉丝 {userDetail.followers?.length || 0} 人</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div>
+                  <div style={{ fontSize: 12, color: 'var(--text-light)', marginBottom: 4 }}>TA 关注的人</div>
+                  {(userDetail.following || []).map((u) => (
+                    <div key={`f-${u.uid}`} style={{ fontSize: 13, padding: '2px 0' }}>
+                      {u.nickname} <span style={{ color: 'var(--text-light)' }}>@{u.username}</span>
+                    </div>
+                  ))}
+                  {(userDetail.following || []).length === 0 && <div className="muted" style={{ fontSize: 12 }}>暂无</div>}
+                </div>
+                <div>
+                  <div style={{ fontSize: 12, color: 'var(--text-light)', marginBottom: 4 }}>TA 的粉丝</div>
+                  {(userDetail.followers || []).map((u) => (
+                    <div key={`r-${u.uid}`} style={{ fontSize: 13, padding: '2px 0' }}>
+                      {u.nickname} <span style={{ color: 'var(--text-light)' }}>@{u.username}</span>
+                    </div>
+                  ))}
+                  {(userDetail.followers || []).length === 0 && <div className="muted" style={{ fontSize: 12 }}>暂无</div>}
+                </div>
+              </div>
             </div>
 
             <div className="admin-detail-section">

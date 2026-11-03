@@ -596,6 +596,8 @@ module.exports.register = function register(ctx) {
 
   // ---------- 超级管理员：修改用户名 ----------
   router.put('/admin/users/:uid/username', superAuth, async (req, res) => {
+    const reason = String((req.body && req.body.reason) || '').trim();
+    if (!reason) return res.status(400).json({ error: '请填写修改理由' });
     const username = String(req.body.username || '').trim();
     if (username.length < 3 || username.length > 20) {
       return res.status(400).json({ error: '用户名需 3-20 位' });
@@ -609,13 +611,15 @@ module.exports.register = function register(ctx) {
     if (exists) return res.status(400).json({ error: '该用户名已被占用' });
     await db.prepare(`UPDATE users SET username = ? WHERE id = ?`).run(username, user.id);
     await notify(user.id, 'system', 'system', null,
-      `超级管理员已将你的用户名修改为 @${username}（原用户名：@${user.username}）`);
-    await logAdminAction(req, 'change_username', 'user', user.uid, `${user.username} → ${username}`, '');
+      `超级管理员已将你的用户名修改为 @${username}（原用户名：@${user.username}），理由：${reason}`);
+    await logAdminAction(req, 'change_username', 'user', user.uid, reason, `${user.username} → ${username}`);
     res.json({ ok: true, username });
   });
 
   // ---------- 超级管理员：自定义标签与颜色 ----------
   router.put('/admin/users/:uid/tags', superAuth, async (req, res) => {
+    const reason = String((req.body && req.body.reason) || '').trim();
+    if (!reason) return res.status(400).json({ error: '请填写修改理由' });
     const user = await db.prepare(`SELECT id, uid, nickname, custom_tag, tag_color FROM users WHERE uid = ?`).get(req.params.uid);
     if (!user) return res.status(404).json({ error: '用户不存在' });
     const customTag = req.body.custom_tag === undefined ? user.custom_tag : String(req.body.custom_tag || '').slice(0, 12);
@@ -628,8 +632,8 @@ module.exports.register = function register(ctx) {
     await db.prepare(`UPDATE users SET custom_tag = ?, tag_color = ? WHERE id = ?`)
       .run(customTag || null, tagColor || null, user.id);
     await notify(user.id, 'system', 'system', null,
-      `超级管理员为你设置了新标签${customTag ? `：${customTag}` : '（已清除）'}`);
-    await logAdminAction(req, 'set_user_tag', 'user', user.uid, customTag || '', tagColor || '');
+      `超级管理员为你设置了新标签${customTag ? `：${customTag}` : '（已清除）'}，理由：${reason}`);
+    await logAdminAction(req, 'set_user_tag', 'user', user.uid, reason, customTag || '');
     res.json({ ok: true, custom_tag: customTag || null, tag_color: tagColor || null });
   });
 

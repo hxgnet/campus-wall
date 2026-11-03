@@ -1,16 +1,10 @@
-import { NavLink, useNavigate, useLocation } from 'react-router-dom';
-import { useAuth } from '../AuthContext.jsx';
+import { NavLink } from 'react-router-dom';
 import { useTheme } from '../ThemeContext.jsx';
-import { api } from '../api.js';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import BrandMark from './BrandMark.jsx';
 
 export default function Header() {
-  const { user, logout } = useAuth();
   const { dark, toggle } = useTheme();
-  const navigate = useNavigate();
-  const location = useLocation();
-  const [unread, setUnread] = useState(0);
   const headerRef = useRef(null);
 
   useEffect(() => {
@@ -21,19 +15,6 @@ export default function Header() {
     const ro = new ResizeObserver(sync);
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
-
-  // 路由变化时重新拉取未读数；进入通知页直接归零，避免徽标常亮
-  useEffect(() => {
-    if (!user) { setUnread(0); return; }
-    if (location.pathname === '/notifications') { setUnread(0); return; }
-    api.getUnreadCount().then((d) => setUnread(d.count)).catch(() => {});
-  }, [user, location.pathname]);
-
-  useEffect(() => {
-    const clear = () => setUnread(0);
-    window.addEventListener('notifications-read', clear);
-    return () => window.removeEventListener('notifications-read', clear);
   }, []);
 
   return (
@@ -48,20 +29,8 @@ export default function Header() {
         </NavLink>
         <nav className="nav-links">
           <div className="nav-inner">
-          <a href="https://www.webintoapp.com/store/1745442" target="_blank" rel="noopener noreferrer">下载 App</a>
-          {user ? (
-            <>
-              <NavLink to="/apply">申请</NavLink>
-              <NavLink to="/notifications" className="notif-badge" data-count={unread > 0 ? unread : ''}>通知</NavLink>
-              <NavLink to="/favorites">收藏</NavLink>
-              {(user.role === 'admin' || user.role === 'super') && <NavLink to="/admin">管理</NavLink>}
-              <button className="back-btn" style={{ color: '#fff', margin: 0 }} onClick={() => { logout(); navigate('/'); }}>退出</button>
-            </>
-          ) : (
-            <NavLink to="/login">登录</NavLink>
-          )}
-          <NavLink to="/about">校园介绍</NavLink>
-          <button className="back-btn" style={{ color: '#fff', margin: 0, fontSize: 18 }} onClick={toggle}>{dark ? '☀️' : '🌙'}</button>
+            <NavLink to="/about">校园介绍</NavLink>
+            <button className="back-btn" style={{ color: '#fff', margin: 0, fontSize: 18 }} onClick={toggle}>{dark ? '☀️' : '🌙'}</button>
           </div>
         </nav>
       </div>
